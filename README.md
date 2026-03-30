@@ -851,20 +851,29 @@ Run `python benchmark.py` to measure performance on your hardware.
 ## Architecture
 
 ```
-hexbot.py       High-level framework (Bot, Arena, analysis functions)
+hexbot.py       High-level framework (Bot, Arena, train, analysis functions)
     |
-hexgame.py      Game engine API (HexGame, clean Python interface)
-    |
-engine.so       Compiled C shared library (auto-built from engine.c)
-    |
-engine.c        2,331 lines of optimized C:
-                  - Bitboard win detection (5 shifts + 5 ANDs)
-                  - Pre-allocated candidate tracking (zero malloc)
-                  - Alpha-beta with transposition table (8M entries)
-                  - Killer move heuristics + late move reduction
-                  - Zobrist hashing for position deduplication
-                  - Heuristic move scoring
+    ├── hexgame.py    Game engine API (HexGame wrapping C engine)
+    │       |
+    │   engine.so     Compiled C library (auto-built from engine.c)
+    │       |
+    │   engine.c      2,331 lines of optimized C
+    │
+    ├── bot.py        Neural network + MCTS + training (optional, needs PyTorch)
+    │       |
+    │   main.py       Pure Python game engine (used by bot.py for training)
+    │
+    └── examples/     Example bots demonstrating different approaches
 ```
+
+| File | Lines | What it does |
+|------|-------|-------------|
+| `hexbot.py` | 660 | Framework API: Bot, Arena, analysis functions, train() |
+| `hexgame.py` | 550 | Clean game engine wrapping the C engine via ctypes |
+| `engine.c` | 2,331 | C engine: bitboards, alpha-beta, threat detection, move scoring |
+| `bot.py` | 3,472 | Neural network (HexNet), MCTS, batched search, self-play, training |
+| `main.py` | 509 | Pure Python game engine with undo, Zobrist hashing, candidates |
+| `benchmark.py` | 254 | Performance benchmarks for the C engine |
 
 ### How the C Engine Works
 
@@ -921,6 +930,61 @@ The full project (not included in this framework repo) includes a Playwright-bas
 | `examples/evolutionary.py` | Evolutionary | Evolve scoring weights through tournament selection |
 | `examples/train_bot.py` | Neural network | Train an AlphaZero-style bot from scratch |
 | `examples/bot_vs_bot.py` | Comparison | Compare multiple bot types head-to-head |
+
+## Advanced: Speedup Techniques
+
+### Batched Neural Network Evaluation
+
+When using a neural network for position evaluation inside alpha-beta search, the naive approach calls Python from C for every leaf node — about 600 microseconds per call due to ctypes overhead. With thousands of leaves per move, this dominates search time.
+
+The framework includes a batched evaluation system that eliminates this bottleneck. Instead of calling Python once per leaf, the C engine collects all leaf positions into a buffer during the first search pass, Python evaluates them all in a single GPU batch, and the C engine re-searches with the cached values.
+
+```python
+from bot import BatchedNNAlphaBeta, create_network
+
+net = create_network('standard')
+# ... load weights ...
+
+searcher = BatchedNNAlphaBeta(net, depth=8, nn_depth=5)
+policy = searcher.search(game)
+best_move = max(policy, key=policy.get)
+```
+
+The two-phase approach works like this:
+
+1. **Phase 1 (Collect):** C alpha-beta runs to completion using a fast heuristic at leaves. Positions that need NN evaluation are stored in a buffer (up to 2,048 per batch).
+
+2. **Phase 2 (Evaluate):** Python reads all collected positions, encodes them as tensors, and runs one batched forward pass through the neural network. Results are injected into the C engine's value cache.
+
+3. **Phase 3 (Re-search):** C alpha-beta runs again. This time leaf positions hit the NN cache instead of using the heuristic, producing much better move ordering and pruning.
+
+This gives 5-10x speedup over the callback approach because there are zero Python-C transitions during search — just two bulk data transfers plus two search invocations.
+
+### MCTS with Virtual Loss Batching
+
+The `BatchedMCTS` class uses virtual loss to select multiple leaves simultaneously, then evaluates them all in one batched NN forward pass:
+
+```python
+from bot import BatchedMCTS, create_network
+
+net = create_network('standard')
+mcts = BatchedMCTS(net, num_simulations=200, batch_size=8)
+policy = mcts.search(game, temperature=1.0, add_noise=True)
+```
+
+Virtual loss temporarily increments a node's visit count before evaluation, ensuring that parallel leaf selections explore different branches. After the batch evaluation completes, the virtual losses are corrected. This reduces the number of NN forward passes by the batch size factor (8x fewer calls with batch_size=8).
+
+### AB Hybrid in MCTS
+
+The `BatchedMCTS` also includes a shallow alpha-beta pre-check at the root. Before running MCTS simulations, it does a quick depth-4 C engine search (~10ms). If alpha-beta finds a proven win (value = ±1.0), MCTS is skipped entirely and the winning move is returned immediately. This catches forced tactical sequences that MCTS would need hundreds of simulations to discover.
+
+### Transposition Cache
+
+MCTS normally evaluates the same position multiple times when reached through different move orders. In Connect-6, this is common because placing stones A then B produces the same board as B then A. The `BatchedMCTS` caches NN evaluations by Zobrist hash, reusing results for transposed positions. This typically saves 20-40% of NN calls.
+
+### C Engine Move Ordering
+
+The C engine's `board_get_scored_moves()` function provides fast heuristic move ordering that benefits any search algorithm. Moves are scored by line extension potential, blocking value, and proximity. When used as the first pass before NN evaluation, it ensures the most promising moves are searched first, improving alpha-beta cutoff rates and MCTS convergence.
 
 ## Contributing
 

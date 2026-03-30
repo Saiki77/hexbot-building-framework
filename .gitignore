@@ -28,8 +28,6 @@ __pycache__/
 .claude/
 
 # Internal tools (not part of framework)
-bot.py
-main.py
 dashboard.py
 browser_player.py
 online_player.py
