@@ -1321,6 +1321,7 @@ observer = DashboardObserver(metrics_store, socketio)
 training_mgr = TrainingManager(metrics_store, observer, socketio, resource_monitor)
 live_broadcaster = LiveGameBroadcaster(socketio, training_mgr)
 observer._live_broadcaster = live_broadcaster  # wire up game replay
+live_broadcaster.start()  # always running, waits for games to arrive
 
 # Start gentle background scraper
 bg_scraper = BackgroundScraper(os.path.join(os.path.dirname(__file__), 'human_games.jsonl'))
