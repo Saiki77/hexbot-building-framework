@@ -1774,73 +1774,49 @@ def load_online_games(path: str = "online_games.jsonl",
 
 
 # ---------------------------------------------------------------------------
-# Symmetry augmentation — all valid hex transforms
+# Symmetry augmentation — valid hex-on-grid transforms
 # ---------------------------------------------------------------------------
-# Hex axial coords (q, r) have 3 line directions: (1,0), (0,1), (1,-1).
-# Valid transforms must map this set of directions onto itself.
+# The board is encoded as a 19x19 rectangular grid where (i,j) = axial (q,r).
+# Valid augmentations must be in BOTH the square grid symmetry group (D4, order 8)
+# AND the hex symmetry group (D6, order 12).
 #
-# The full symmetry group gives 4 non-identity transforms:
-#   1. 180° rotation:  (q,r) → (-q, -r)         grid: (i,j) → (N-1-i, N-1-j)
-#   2. Reflect (q,r) → (r, q)                    grid: (i,j) → (j, i)
-#   3. Reflect (q,r) → (q, -q-r)                 grid: (i,j) → (i, N-1-i-j)
-#   4. Reflect (q,r) → (-q-r, r)                 grid: (i,j) → (N-1-i-j, j)
+# Intersection = 3 non-identity transforms:
+#   1. (q,r) → (-q,-r)   grid: (i,j) → (N-1-i, N-1-j)   180° rotation
+#   2. (q,r) → (r,q)     grid: (i,j) → (j,i)             transpose
+#   3. (q,r) → (-r,-q)   grid: (i,j) → (N-1-j, N-1-i)   transpose + 180°
 #
-# Transforms 3 & 4 use cube coordinate s = -q-r, so the target index
-# depends on both source indices — can't be done with simple flip/transpose.
-# Credit: Mina & Flopster for the correct hex symmetry group.
-
-# Pre-compute remap tables (computed once, reused for every sample)
-_HEX_REMAP_TABLES = None
-
-def _get_hex_remap_tables():
-    global _HEX_REMAP_TABLES
-    if _HEX_REMAP_TABLES is not None:
-        return _HEX_REMAP_TABLES
-    N = BOARD_SIZE
-    tables = []
-    transforms = [
-        lambda i, j: (N-1-i, N-1-j),       # 180° rotation
-        lambda i, j: (j, i),                 # (q,r) → (r,q)
-        lambda i, j: (i, N-1-i-j),           # (q,r) → (q, -q-r)
-        lambda i, j: (N-1-i-j, j),           # (q,r) → (-q-r, r)
-    ]
-    for tfn in transforms:
-        src_i, src_j, dst_i, dst_j = [], [], [], []
-        for i in range(N):
-            for j in range(N):
-                ni, nj = tfn(i, j)
-                if 0 <= ni < N and 0 <= nj < N:
-                    src_i.append(i)
-                    src_j.append(j)
-                    dst_i.append(ni)
-                    dst_j.append(nj)
-        tables.append((np.array(src_i), np.array(src_j),
-                        np.array(dst_i), np.array(dst_j)))
-    _HEX_REMAP_TABLES = tables
-    return tables
-
+# Other hex reflections like (q,r)→(q,-q-r) map grid positions OUTSIDE the
+# NxN grid (N-1-i-j < 0 when i+j > N-1), producing broken boards with
+# missing stones. Credit: Flopster for catching this.
 
 def augment_sample(sample: TrainingSample) -> List[TrainingSample]:
-    """Apply all valid hex symmetry augmentations.
-    Returns 4 new samples: 180° rotation + 3 reflections."""
-    N = BOARD_SIZE
+    """Apply valid hex-on-grid symmetry augmentations.
+    Returns 3 new samples: 180° rotation, transpose, transpose+180°."""
     state = sample.encoded_state.numpy()  # (C, N, N)
-    policy = sample.policy_target.reshape(N, N)
-    tables = _get_hex_remap_tables()
+    policy = sample.policy_target.reshape(BOARD_SIZE, BOARD_SIZE)
     aug = []
 
-    for si, sj, di, dj in tables:
-        s_new = np.zeros_like(state)
-        p_new = np.zeros_like(policy)
-        s_new[:, di, dj] = state[:, si, sj]
-        p_new[di, dj] = policy[si, sj]
-        p_flat = p_new.flatten()
-        ps = p_flat.sum()
+    transforms = [
+        # 180° rotation: (i,j) → (N-1-i, N-1-j)
+        (lambda s: s[:, ::-1, ::-1].copy(),
+         lambda p: p[::-1, ::-1].copy()),
+        # Transpose: (i,j) → (j,i)
+        (lambda s: s.transpose(0, 2, 1).copy(),
+         lambda p: p.T.copy()),
+        # Transpose + 180°: (i,j) → (N-1-j, N-1-i)
+        (lambda s: s[:, ::-1, ::-1].transpose(0, 2, 1).copy(),
+         lambda p: p[::-1, ::-1].T.copy()),
+    ]
+
+    for s_fn, p_fn in transforms:
+        s_new = s_fn(state)
+        p_new = p_fn(policy).flatten()
+        ps = p_new.sum()
         if ps > 0:
-            p_flat = p_flat / ps
+            p_new = p_new / ps
         aug.append(TrainingSample(
             encoded_state=torch.from_numpy(np.ascontiguousarray(s_new)),
-            policy_target=np.ascontiguousarray(p_flat),
+            policy_target=np.ascontiguousarray(p_new),
             player=sample.player,
             result=sample.result,
             threat_label=sample.threat_label,
