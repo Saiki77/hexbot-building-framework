@@ -310,7 +310,7 @@ Any function that takes a game and returns a `(q, r)` move works as a bot. You c
 
 ## Training Dashboard
 
-A live training dashboard that visualizes games, tracks ELO, loss curves, and more. Works with any bot — the framework's built-in bots or your own.
+A live training dashboard that visualizes games, tracks ELO, loss curves, and more. Works with any bot -the framework's built-in bots or your own.
 
 ### Quick Start
 
@@ -349,7 +349,7 @@ for iteration in range(100):
 
 ### Use with Your Own Bot
 
-Any code that produces games can feed the dashboard — just call `add_game()`:
+Any code that produces games can feed the dashboard -just call `add_game()`:
 
 ```python
 from dashboard import Dashboard
@@ -1217,7 +1217,7 @@ All constants are at the top of `bot.py`. Set `PLAY_STYLE = 'close'` to disable 
 
 ### Threat Evaluation
 
-The threat system only counts lines that can still extend to 6. A 4-in-a-row blocked on both ends by opponent stones is not counted as a threat — the evaluator checks that `consecutive + open_forward + open_backward >= 6` before scoring.
+The threat system only counts lines that can still extend to 6. A 4-in-a-row blocked on both ends by opponent stones is not counted as a threat -the evaluator checks that `consecutive + open_forward + open_backward >= 6` before scoring.
 
 ## Contributing
 
