@@ -1774,47 +1774,60 @@ def load_online_games(path: str = "online_games.jsonl",
 
 
 # ---------------------------------------------------------------------------
-# Symmetry augmentation — 4x data multiplier (2D rotations + flip)
+# Symmetry augmentation — hex-valid transforms only
 # ---------------------------------------------------------------------------
+# Hex grids (axial coords) do NOT have 4-fold (90°) symmetry like square grids.
+# Valid transforms for axial (q, r) encoded as grid (i, j):
+#   1. 180° rotation: (i, j) → (N-1-i, N-1-j)  — always valid
+#   2. Flip q-axis:   (i, j) → (N-1-i, j)       — reflect across r
+#   3. Flip r-axis:   (i, j) → (i, N-1-j)        — reflect across q
+# These give 3 augmented samples (original + 3 = 4 total).
+# NOTE: rot90/rot270 are WRONG for hex — they swap q/r which breaks the geometry.
+
+def _augment_transform(state, policy_2d, transform_fn):
+    """Apply a spatial transform to state and policy."""
+    s_new = transform_fn(state)
+    p_new = transform_fn(policy_2d).flatten()
+    ps = p_new.sum()
+    if ps > 0:
+        p_new = p_new / ps
+    return s_new, p_new
+
 
 def augment_sample(sample: TrainingSample) -> List[TrainingSample]:
-    """Apply 2D augmentations (rot90, rot180, rot270, hflip) to a sample.
-    Returns 4 new augmented samples."""
-    state = sample.encoded_state.numpy()  # (5, 19, 19)
+    """Apply hex-valid symmetry augmentations.
+    Returns 3 new samples: 180° rotation, q-flip, r-flip."""
+    state = sample.encoded_state.numpy()  # (C, 19, 19)
     policy = sample.policy_target.reshape(BOARD_SIZE, BOARD_SIZE)
+    N = BOARD_SIZE  # 19
     aug = []
 
-    # 90°, 180°, 270° rotations
-    for k in (1, 2, 3):
-        s_rot = np.rot90(state, k, axes=(1, 2)).copy()
-        p_rot = np.rot90(policy, k).copy().flatten()
-        # Renormalize policy
-        ps = p_rot.sum()
+    transforms = [
+        # 180° rotation: flip both axes
+        lambda x: x[..., ::-1, ::-1].copy() if x.ndim == 3
+                  else x[::-1, ::-1].copy(),
+        # Flip q-axis (rows): reflect i
+        lambda x: x[..., ::-1, :].copy() if x.ndim == 3
+                  else x[::-1, :].copy(),
+        # Flip r-axis (cols): reflect j
+        lambda x: x[..., :, ::-1].copy() if x.ndim == 3
+                  else x[:, ::-1].copy(),
+    ]
+
+    for tfn in transforms:
+        s_new = tfn(state)
+        p_new = tfn(policy).flatten()
+        ps = p_new.sum()
         if ps > 0:
-            p_rot /= ps
+            p_new = p_new / ps
         aug.append(TrainingSample(
-            encoded_state=torch.from_numpy(s_rot),
-            policy_target=p_rot,
+            encoded_state=torch.from_numpy(np.ascontiguousarray(s_new)),
+            policy_target=np.ascontiguousarray(p_new),
             player=sample.player,
             result=sample.result,
             threat_label=sample.threat_label,
-            priority=sample.priority * 0.8,  # slightly lower priority for augmented
+            priority=sample.priority * 0.8,
         ))
-
-    # Horizontal flip
-    s_flip = np.ascontiguousarray(state[:, :, ::-1])
-    p_flip = np.ascontiguousarray(policy[:, ::-1]).flatten()
-    ps = p_flip.sum()
-    if ps > 0:
-        p_flip /= ps
-    aug.append(TrainingSample(
-        encoded_state=torch.from_numpy(s_flip),
-        policy_target=p_flip,
-        player=sample.player,
-        result=sample.result,
-        threat_label=sample.threat_label,
-        priority=sample.priority * 0.8,
-    ))
 
     return aug
 
