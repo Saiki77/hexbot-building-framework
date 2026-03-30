@@ -1883,7 +1883,8 @@ def self_play_game(
 
         # Sample and play move
         moves = list(policy.keys())
-        probs = [policy[m] for m in moves]
+        probs = np.array([policy[m] for m in moves], dtype=np.float64)
+        probs /= probs.sum()
         idx = np.random.choice(len(moves), p=probs)
         chosen = moves[idx]
         move_history.append(chosen)
@@ -3166,16 +3167,15 @@ def self_play_game_v2(
                             if (cq, cr) not in existing and (cq, cr) not in policy:
                                 gap_candidates.append((cq, cr))
                 if gap_candidates:
-                    # Add a few random gap positions with small weight
                     n_inject = min(3, len(gap_candidates))
                     injected = random.sample(gap_candidates, n_inject)
-                    # Give each injected move ~5% of total probability
-                    inject_weight = 0.05 / n_inject
-                    total = sum(policy.values())
-                    scale = (1.0 - inject_weight * n_inject)
-                    policy = {m: p * scale / total for m, p in policy.items()}
+                    inject_each = 0.05 / n_inject
                     for m in injected:
-                        policy[m] = inject_weight
+                        policy[m] = inject_each
+                    # Renormalize so probabilities sum to exactly 1.0
+                    total = sum(policy.values())
+                    if total > 0:
+                        policy = {m: p / total for m, p in policy.items()}
 
         # --- RESIGN THRESHOLD: stop hopeless games early ---
         # Disabled: causes false "draws" on an infinite board where draws don't exist
@@ -3211,7 +3211,8 @@ def self_play_game_v2(
         ))
 
         moves = list(policy.keys())
-        probs = [policy[m] for m in moves]
+        probs = np.array([policy[m] for m in moves], dtype=np.float64)
+        probs /= probs.sum()
         idx = np.random.choice(len(moves), p=probs)
         chosen = moves[idx]
         move_history.append(chosen)
