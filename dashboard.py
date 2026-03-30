@@ -469,7 +469,7 @@ footer span{white-space:nowrap}
 .settings-row label{width:110px;font-weight:700;flex-shrink:0}
 .settings-row input[type=range]{flex:1;accent-color:#000}
 .settings-row span.val{width:50px;text-align:right;font-size:10px}
-.gh-item{cursor:pointer;padding:2px 4px;border-radius:2px;display:inline-block;margin:1px}
+.gh-item{cursor:pointer;padding:1px 3px;border-radius:2px;display:inline-block;margin:0 1px;font-size:8px}
 .gh-item:hover{background:#eee}
 .gh-item.active{background:#000;color:#fff}
 .conn-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:8px;vertical-align:middle}
@@ -540,11 +540,11 @@ footer span{white-space:nowrap}
     </div>
     <div id="hex-canvas-wrap"><canvas id="hex-canvas"></canvas></div>
     <div class="game-info" id="game-info">Waiting for games...</div>
-    <div id="game-history" style="width:100%;margin-top:8px;max-height:80px;overflow-y:auto;
-      font:10px 'SF Mono',monospace;border-top:1px solid #eee;padding-top:6px">
+    <div id="game-history" style="width:100%;margin-top:6px;max-height:48px;overflow-y:auto;overflow-x:hidden;
+      font:9px 'SF Mono',monospace;border-top:1px solid #eee;padding-top:4px;line-height:1.6">
     </div>
-    <div style="font:9px 'SF Mono',monospace;color:#aaa;margin-top:4px">
-      Space: pause/resume &middot; &larr;/&rarr;: step &middot; R: restart game
+    <div style="font:8px 'SF Mono',monospace;color:#bbb;margin-top:2px">
+      Space: pause &middot; R: restart
     </div>
   </div>
   <div class="right">
@@ -812,7 +812,7 @@ function replayGame(d) {
       setTimeout(() => {
         replayBusy = false;
         if (pendingGame) { const g = pendingGame; pendingGame = null; replayGame(g); }
-      }, 1500);
+      }, 800);
       return;
     }
     const m = moves[mi];
@@ -859,7 +859,7 @@ const gameHistoryList = [];  // store last 20 games
 
 function addToHistory(d) {
   gameHistoryList.push(d);
-  if (gameHistoryList.length > 20) gameHistoryList.shift();
+  if (gameHistoryList.length > 10) gameHistoryList.shift();
   const histEl = el('game-history');
   if (!histEl) return;
   histEl.innerHTML = '';
@@ -879,37 +879,32 @@ function addToHistory(d) {
 // ---------------------------------------------------------------------------
 socket.on('game_complete', d => {
   try {
-    if (!d.moves || !d.moves.length) return;
-    // Cancel any in-progress replay
-    if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
     el('status').textContent = 'GAME ' + d.game_idx;
-    // Progress bar for self-play
+    // Progress bar
     if (d.total_games) {
       const pw = el('progress-wrap');
-      const pf = el('progress-fill');
-      const plab = el('progress-label');
       if (pw) pw.style.display = '';
+      const pf = el('progress-fill');
       if (pf) pf.style.width = Math.round(d.game_idx / d.total_games * 100) + '%';
+      const plab = el('progress-label');
       if (plab) plab.textContent = 'Self-play ' + d.game_idx + '/' + d.total_games;
     }
-    // Update live stats
+    // Stats
     gameStats.count++;
-    gameStats.totalLen += d.num_moves;
+    gameStats.totalLen += (d.num_moves || 0);
     if (d.result > 0) gameStats.w0++; else if (d.result < 0) gameStats.w1++;
-    const lsG = el('ls-games');
-    if (lsG) lsG.textContent = gameStats.count;
-    const lsL = el('ls-len');
-    if (lsL) lsL.textContent = Math.round(gameStats.totalLen / gameStats.count);
-    const lsW0 = el('ls-w0');
-    if (lsW0) lsW0.textContent = Math.round(gameStats.w0 / gameStats.count * 100) + '%';
-    const lsW1 = el('ls-w1');
-    if (lsW1) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
-    // Add to history and queue or play replay
-    addToHistory(d);
-    if (replayBusy) {
-      pendingGame = d;
-    } else {
-      replayGame(d);
+    const lsG = el('ls-games'); if (lsG) lsG.textContent = gameStats.count;
+    const lsL = el('ls-len'); if (lsL && gameStats.count) lsL.textContent = Math.round(gameStats.totalLen / gameStats.count);
+    const lsW0 = el('ls-w0'); if (lsW0 && gameStats.count) lsW0.textContent = Math.round(gameStats.w0 / gameStats.count * 100) + '%';
+    const lsW1 = el('ls-w1'); if (lsW1 && gameStats.count) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
+    // History + replay (NEVER interrupt a playing game)
+    if (d.moves && d.moves.length) {
+      addToHistory(d);
+      if (replayBusy) {
+        pendingGame = d;  // just queue the latest, current game plays to end
+      } else {
+        replayGame(d);
+      }
     }
   } catch (e) { console.error('game_complete error:', e); }
 });
