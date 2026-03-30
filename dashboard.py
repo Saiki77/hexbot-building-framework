@@ -533,13 +533,15 @@ class DashboardObserver:
     def on_game_complete(self, game_idx: int, total_games: int,
                          move_history: list, result: float,
                          num_samples: int) -> None:
-        self.sio.emit('game_complete', {
+        data = {
             'game_idx': game_idx + 1,
             'total_games': total_games,
             'result': result,
             'num_moves': len(move_history),
             'moves': move_history,
-        })
+        }
+        print(f'  │  📺 Emitting game_complete #{game_idx+1} with {len(move_history)} moves')
+        self.sio.emit('game_complete', data)
 
     def on_iteration_complete(self, metrics: dict) -> None:
         self.metrics.add_iteration(metrics)
@@ -1787,33 +1789,50 @@ function replayGame(d){
 }
 
 socket.on('game_complete', d=>{
+  try{
+  console.log('game_complete', d.game_idx, d.total_games, 'moves:', d.moves?d.moves.length:0);
   el('status').textContent='ITER '+el('s-iter').textContent+' G'+d.game_idx+'/'+d.total_games;
   // Progress bar
-  el('progress-wrap').style.display='';
-  el('progress-fill').style.width=Math.round(d.game_idx/d.total_games*100)+'%';
-  el('progress-label').textContent='Self-play '+d.game_idx+'/'+d.total_games;
+  const pw=document.getElementById('progress-wrap');
+  const pf=document.getElementById('progress-fill');
+  const plab=document.getElementById('progress-label');
+  if(pw) pw.style.display='';
+  if(pf) pf.style.width=Math.round(d.game_idx/d.total_games*100)+'%';
+  if(plab) plab.textContent='Self-play '+d.game_idx+'/'+d.total_games;
   // Update live stats
   gameStats.count++;
   gameStats.totalLen+=d.num_moves;
   if(d.result>0) gameStats.w0++; else if(d.result<0) gameStats.w1++;
-  el('ls-games').textContent=d.game_idx+'/'+d.total_games;
-  el('ls-len').textContent=Math.round(gameStats.totalLen/gameStats.count);
-  el('ls-w0').textContent=Math.round(gameStats.w0/gameStats.count*100)+'%';
-  el('ls-w1').textContent=Math.round(gameStats.w1/gameStats.count*100)+'%';
+  const lsG=document.getElementById('ls-games');
+  if(lsG) lsG.textContent=d.game_idx+'/'+d.total_games;
+  const lsL=document.getElementById('ls-len');
+  if(lsL) lsL.textContent=Math.round(gameStats.totalLen/gameStats.count);
+  const lsW0=document.getElementById('ls-w0');
+  if(lsW0) lsW0.textContent=Math.round(gameStats.w0/gameStats.count*100)+'%';
+  const lsW1=document.getElementById('ls-w1');
+  if(lsW1) lsW1.textContent=Math.round(gameStats.w1/gameStats.count*100)+'%';
   // Queue or play game replay
   if(d.moves && d.moves.length>0){
+    console.log('Starting replay of game', d.game_idx, 'with', d.moves.length, 'moves');
     if(replayBusy){
-      pendingGame=d;  // queue latest, plays after current finishes
+      pendingGame=d;
     } else {
       replayGame(d);
     }
   }
+  }catch(e){console.error('game_complete error:',e);}
 });
 socket.on('train_progress', d=>{
-  el('progress-wrap').style.display='';
-  el('progress-fill').style.width=d.pct+'%';
-  el('progress-label').textContent='Training '+d.step+'/'+d.total+' (loss '+d.loss+')';
-  el('ls-loss').textContent=d.loss;
+  try{
+  const pw2=document.getElementById('progress-wrap');
+  const pf2=document.getElementById('progress-fill');
+  const plab2=document.getElementById('progress-label');
+  if(pw2) pw2.style.display='';
+  if(pf2) pf2.style.width=d.pct+'%';
+  if(plab2) plab2.textContent='Training '+d.step+'/'+d.total+' (loss '+d.loss+')';
+  const lsLoss=document.getElementById('ls-loss');
+  if(lsLoss) lsLoss.textContent=d.loss;
+  }catch(e){console.error('train_progress error:',e);}
 });
 
 function el(id){return document.getElementById(id)}
