@@ -527,6 +527,7 @@ class DashboardObserver:
         self.metrics = metrics
         self.sio = sio
         self._stop_flag = threading.Event()
+        self.live_broadcaster: Optional['LiveGameBroadcaster'] = None
 
     def on_iteration_start(self, iteration: int, total: int) -> None:
         self.metrics.current_iteration = iteration + 1
@@ -542,6 +543,9 @@ class DashboardObserver:
             'result': result,
             'num_moves': len(move_history),
         })
+        # Feed completed game to live replay
+        if self.live_broadcaster:
+            self.live_broadcaster.enqueue_game(move_history, result)
 
     def on_iteration_complete(self, metrics: dict) -> None:
         self.metrics.add_iteration(metrics)
@@ -1018,6 +1022,14 @@ class TrainingManager:
                     losses = train_step(
                         self.net, optimizer, replay_buffer, self.device
                     )
+                    # Emit progress every 20 steps
+                    if step % 20 == 0 or step == train_steps - 1:
+                        self.sio.emit('train_progress', {
+                            'step': step + 1,
+                            'total': train_steps,
+                            'loss': round(losses['total'], 4),
+                            'pct': round((step + 1) / train_steps * 100),
+                        })
                 train_time = time.perf_counter() - t1
                 steps_per_sec = train_steps / train_time if train_time > 0 else 0
                 scheduler.step()
@@ -1226,11 +1238,15 @@ class BackgroundScraper:
 # ---------------------------------------------------------------------------
 
 class LiveGameBroadcaster:
+    """Replays completed training games move-by-move in the dashboard."""
+
     def __init__(self, sio: SocketIO, tm: TrainingManager):
         self.sio = sio
         self.tm = tm
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._game_queue: list = []  # [(move_history, result), ...]
+        self._lock = threading.Lock()
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -1242,101 +1258,57 @@ class LiveGameBroadcaster:
     def stop(self):
         self._stop.set()
 
+    def enqueue_game(self, move_history: list, result: float):
+        """Called when a training game finishes — add it to the replay queue."""
+        with self._lock:
+            # Keep at most 5 pending games
+            if len(self._game_queue) < 5:
+                self._game_queue.append((move_history, result))
+
     def _loop(self):
         while not self._stop.is_set():
-            if self.tm.net is None:
-                time.sleep(0.5)
-                continue
-            self._play_exhibition()
-            time.sleep(0.5)
-
-    def _play_exhibition(self):
-        # Use a CPU copy to avoid MPS placeholder storage errors
-        # (the main net may have been exported to ONNX, corrupting MPS tensors)
-        try:
-            from bot import create_network
-            net_cpu = create_network('standard')
-        except ImportError:
-            net_cpu = HexNet(num_filters=64, num_res_blocks=4)
-        try:
-            state = {k: v.cpu().clone() for k, v in self.tm.net.state_dict().items()}
-            net_cpu.load_state_dict(state)
-        except Exception:
-            pass  # Use random weights if copy fails
-        net_cpu.eval()
-        try:
-            from bot import BatchedNNAlphaBeta
-            searcher = BatchedNNAlphaBeta(net_cpu, depth=8, nn_depth=5)
-        except Exception:
-            searcher = MCTS(net_cpu, num_simulations=50)
-        game = HexGame(candidate_radius=3, max_total_stones=200)
-
-        self.sio.emit('live_game_start', {})
-        move_num = 0
-
-        while not game.is_terminal and not self._stop.is_set():
-            # Check for forced moves (safety net for exhibition)
-            forced_move = find_forced_move(game)
-            if forced_move:
-                best = forced_move
+            game_data = None
+            with self._lock:
+                if self._game_queue:
+                    game_data = self._game_queue.pop(0)
+            if game_data:
+                self._replay_game(game_data[0], game_data[1])
             else:
-                policy = searcher.search(game, temperature=0.3, add_noise=False)
-                if not policy:
-                    break
+                time.sleep(0.3)
 
-                # --- DISTANT EXPLORATION in exhibition games too ---
-                try:
-                    from bot import PLAY_STYLE, DISTANT_EXPLORE_PROB, DISTANT_RANGE
-                    if PLAY_STYLE == 'distant' and move_num < 15 and random.random() < DISTANT_EXPLORE_PROB:
-                        existing = set(list(game.stones_0) + list(game.stones_1))
-                        if existing:
-                            lo, hi = DISTANT_RANGE
-                            gap = set()
-                            for sq, sr in existing:
-                                for dq in range(-hi, hi + 1):
-                                    for dr in range(-hi, hi + 1):
-                                        d = abs(dq) + abs(dr)
-                                        if lo <= d <= hi:
-                                            cq, cr = sq + dq, sr + dr
-                                            if (cq, cr) not in existing:
-                                                gap.add((cq, cr))
-                            if gap:
-                                policy = {random.choice(list(gap)): 1.0}
-                except Exception:
-                    pass
+    def _replay_game(self, move_history: list, result: float):
+        """Replay a training game move-by-move on screen."""
+        game = HexGame(candidate_radius=3, max_total_stones=200)
+        self.sio.emit('live_game_start', {})
 
-                best = max(policy, key=policy.get)
+        winner_label = 'P0' if result > 0 else ('P1' if result < 0 else 'draw')
+        for move_num, move in enumerate(move_history):
+            if self._stop.is_set():
+                break
+            q, r = move if isinstance(move, (list, tuple)) else (move[0], move[1])
             player = game.current_player
-
-            # Overlay data computed only when policy is available (no extra NN call)
-            top_moves_current = []
-            top_moves_opponent = []
-            value_pred = 0.0
-            if not forced and policy:
-                sorted_p = sorted(policy.items(), key=lambda x: x[1], reverse=True)[:5]
-                top_moves_current = [[list(m), round(p, 3)] for m, p in sorted_p]
-
-            game.place_stone(*best)
-            move_num += 1
+            game.place_stone(q, r)
 
             self.sio.emit('live_game_move', {
-                'move': list(best),
+                'move': [q, r],
                 'player': player,
-                'move_num': move_num,
+                'move_num': move_num + 1,
                 'stones_0': [list(s) for s in game.stones_0],
                 'stones_1': [list(s) for s in game.stones_1],
                 'candidates': [list(c) for c in list(game.candidates)[:80]],
-                'value': round(value_pred, 3),
+                'value': round(result, 3),
                 'current_player': player,
-                'top_moves_current': top_moves_current,
-                'top_moves_opponent': top_moves_opponent,
+                'top_moves_current': [],
+                'top_moves_opponent': [],
             })
-            time.sleep(0.08)
+            # Fast replay: 150ms per move (whole game replays in ~2-3s)
+            time.sleep(0.15)
 
         self.sio.emit('live_game_end', {
             'winner': game.winner,
-            'total_moves': move_num,
+            'total_moves': len(move_history),
         })
+        time.sleep(1.0)  # pause between games
 
 
 # ---------------------------------------------------------------------------
@@ -1352,6 +1324,7 @@ metrics_store = MetricsStore()
 observer = DashboardObserver(metrics_store, socketio)
 training_mgr = TrainingManager(metrics_store, observer, socketio, resource_monitor)
 live_broadcaster = LiveGameBroadcaster(socketio, training_mgr)
+observer.live_broadcaster = live_broadcaster  # wire up game replay feed
 
 # Start gentle background scraper
 bg_scraper = BackgroundScraper(os.path.join(os.path.dirname(__file__), 'human_games.jsonl'))
@@ -1681,9 +1654,17 @@ footer span{white-space:nowrap}
 </header>
 <main>
   <div class="left">
-    <div class="label">Live Game <button id="btn-overlay" onclick="toggleOverlay()" style="font:9px 'Courier New';border:1px solid #000;background:#000;color:#fff;padding:1px 6px;cursor:pointer;margin-left:8px">OVERLAY ON</button></div>
+    <div class="label">Training Game <button id="btn-overlay" onclick="toggleOverlay()" style="font:9px 'Courier New';border:1px solid #000;background:#000;color:#fff;padding:1px 6px;cursor:pointer;margin-left:8px">OVERLAY ON</button></div>
     <div id="hex-canvas-wrap"><canvas id="hex-canvas"></canvas></div>
     <div class="game-info" id="game-info">Waiting for training to start...</div>
+    <div id="progress-wrap" style="margin-top:6px;display:none">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden">
+          <div id="progress-fill" style="height:100%;background:#000;width:0%;transition:width .2s"></div>
+        </div>
+        <span id="progress-label" style="font:700 10px 'Courier New';min-width:80px;text-align:right"></span>
+      </div>
+    </div>
   </div>
   <div class="right">
     <div class="chart-box">
@@ -1829,6 +1810,7 @@ socket.on('iteration_start', d=>{
 });
 socket.on('iteration_complete', d=>{
   updateStats(d); fetchCharts();
+  el('progress-wrap').style.display='none';
   // Auto-refresh network visualization
   const nv=document.getElementById('network-vis-img');
   if(nv) nv.src='/api/network_vis?t='+Date.now();
@@ -1839,6 +1821,17 @@ socket.on('training_complete', ()=>{
 });
 socket.on('game_complete', d=>{
   el('status').textContent='ITER '+el('s-iter').textContent+' G'+d.game_idx+'/'+d.total_games;
+  const pw=el('progress-wrap'), pf=el('progress-fill'), pl=el('progress-label');
+  pw.style.display='';
+  const pct=Math.round(d.game_idx/d.total_games*100);
+  pf.style.width=pct+'%';
+  pl.textContent='Self-play '+d.game_idx+'/'+d.total_games;
+});
+socket.on('train_progress', d=>{
+  const pw=el('progress-wrap'), pf=el('progress-fill'), pl=el('progress-label');
+  pw.style.display='';
+  pf.style.width=d.pct+'%';
+  pl.textContent='Training '+d.step+'/'+d.total+' (loss '+d.loss+')';
 });
 
 function el(id){return document.getElementById(id)}
