@@ -60,7 +60,7 @@ NUM_FILTERS = 128     # 128 filters — fast training, search compensates for wi
 NUM_RES_BLOCKS = 12   # 12 blocks — deeper tower for complex pattern recognition
 
 C_PUCT = 1.5
-DIRICHLET_ALPHA = 0.15   # was 0.03 — more exploration to prevent echo chamber
+DIRICHLET_ALPHA = 0.3    # high noise for exploring distant/non-obvious moves
 DIRICHLET_EPSILON = 0.25
 NUM_SIMULATIONS = 400
 TEMP_THRESHOLD = 35  # was 20 — explore longer into mid-game where we're weakest
@@ -2811,10 +2811,19 @@ class BatchedMCTS:
                         c_priors = {}
                         for i in range(n_scored):
                             c_priors[(q_arr[i], r_arr[i])] = exp_scores[i] / total
-                        # Blend: 70% NN + 30% C heuristic
+                        # Blend NN + C heuristic (less C for distant moves)
+                        existing = set()
+                        if hasattr(game, 'stones_0'):
+                            existing = game.stones_0 | game.stones_1
+                        elif hasattr(game, 'board'):
+                            existing = set(game.board.keys())
                         for move in policy:
                             c_prob = c_priors.get(move, 0.01)
-                            policy[move] = 0.7 * policy[move] + 0.3 * c_prob
+                            # Distant moves: trust NN more (15% C blend vs 30%)
+                            adj = any(abs(move[0]-s[0]) + abs(move[1]-s[1]) <= 1
+                                      for s in existing) if existing else True
+                            blend = 0.3 if adj else 0.15
+                            policy[move] = (1 - blend) * policy[move] + blend * c_prob
                         # Renormalize
                         total_p = sum(policy.values())
                         if total_p > 0:
@@ -3090,6 +3099,21 @@ def self_play_game_v2(
         if not policy:
             break
 
+        # --- DISTANT EXPLORATION: force non-adjacent placements early ---
+        if move_count < 15 and random.random() < 0.20:
+            existing = set()
+            if hasattr(game, 'stones_0'):
+                existing = game.stones_0 | game.stones_1
+            elif hasattr(game, 'board'):
+                existing = set(game.board.keys())
+            if existing:
+                distant = [m for m in game.legal_moves()
+                           if not any(abs(m[0]-s[0]) + abs(m[1]-s[1]) <= 1
+                                      for s in existing)]
+                if distant:
+                    forced = random.choice(distant)
+                    policy = {forced: 1.0}
+
         # --- RESIGN THRESHOLD: stop hopeless games early ---
         # Disabled: causes false "draws" on an infinite board where draws don't exist
         # The game must always play to completion (6-in-a-row)
@@ -3159,6 +3183,21 @@ def self_play_game_v2(
     if n < 30:
         for sample in samples:
             sample.priority *= 0.5
+
+    # --- DIVERSITY BONUS: reward games with spread-out stone placement ---
+    if game.total_stones > 10:
+        all_stones = []
+        if hasattr(game, 'stones_0'):
+            all_stones = list(game.stones_0) + list(game.stones_1)
+        elif hasattr(game, 'board'):
+            all_stones = list(game.board.keys())
+        if all_stones:
+            qs = [s[0] for s in all_stones]
+            rs = [s[1] for s in all_stones]
+            spread = max(max(qs) - min(qs), max(rs) - min(rs))
+            if spread >= 8:
+                for sample in samples:
+                    sample.priority *= 1.5
 
     return samples, move_history
 
