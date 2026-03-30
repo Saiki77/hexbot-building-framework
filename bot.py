@@ -1080,8 +1080,11 @@ def compute_threat_label(game: HexGame) -> np.ndarray:
 
     _AXES = ((1, 0), (0, 1), (1, -1))
 
-    def analyze_stones(stones: set):
-        """Returns (max_consecutive, axes_with_2plus, axes_with_3plus)."""
+    all_stones = my_stones | opp_stones
+
+    def analyze_stones(stones: set, blockers: set):
+        """Returns (max_live_consecutive, axes_with_2plus, axes_with_3plus).
+        Only counts lines that can still extend to 6 (have enough open space)."""
         if not stones:
             return 0, 0, 0
         best = 0
@@ -1090,12 +1093,30 @@ def compute_threat_label(game: HexGame) -> np.ndarray:
         for dq, dr in _AXES:
             axis_best = 0
             for q, r in stones:
+                # Count consecutive run
                 count = 1
                 nq, nr = q + dq, r + dr
                 while (nq, nr) in stones:
                     count += 1
                     nq += dq
                     nr += dr
+                # Check if this line can extend to 6: count open spaces
+                # in both directions until blocked
+                open_fwd = 0
+                fq, fr = q + dq * count, r + dr * count
+                while (fq, fr) not in blockers and open_fwd < 6:
+                    open_fwd += 1
+                    fq += dq
+                    fr += dr
+                open_bwd = 0
+                bq, br = q - dq, r - dr
+                while (bq, br) not in blockers and open_bwd < 6:
+                    open_bwd += 1
+                    bq -= dq
+                    br -= dr
+                potential = count + open_fwd + open_bwd
+                if potential < 6:
+                    continue  # dead line, can never reach 6
                 if count > axis_best:
                     axis_best = count
                 if count > best:
@@ -1106,8 +1127,8 @@ def compute_threat_label(game: HexGame) -> np.ndarray:
                 axes_3plus += 1
         return best, axes_2plus, axes_3plus
 
-    my_max, my_axes2, my_axes3 = analyze_stones(my_stones)
-    opp_max, opp_axes2, opp_axes3 = analyze_stones(opp_stones)
+    my_max, my_axes2, my_axes3 = analyze_stones(my_stones, opp_stones)
+    opp_max, opp_axes2, opp_axes3 = analyze_stones(opp_stones, my_stones)
 
     # Continuous threat level: preemptives start at 2-in-a-row
     # 4 and 5 are nearly identical — both can finish with 1 stone
@@ -2820,11 +2841,7 @@ class BatchedMCTS:
                         # Blend NN + C heuristic
                         if PLAY_STYLE == 'distant':
                             # Less C influence on distant moves so NN can explore
-                            existing = set()
-                            if hasattr(game, 'stones_0'):
-                                existing = game.stones_0 | game.stones_1
-                            elif hasattr(game, 'board'):
-                                existing = set(game.board.keys())
+                            existing = _get_existing_stones(game)
                             for move in policy:
                                 c_prob = c_priors.get(move, 0.01)
                                 adj = any(abs(move[0]-s[0]) + abs(move[1]-s[1]) <= 1
@@ -3058,6 +3075,21 @@ class BatchedMCTS:
 
 
 # ---------------------------------------------------------------------------
+# Helper: get all stone positions from any game type
+# ---------------------------------------------------------------------------
+
+def _get_existing_stones(game) -> set:
+    """Return set of (q,r) for all placed stones, works with CGameState and HexGame."""
+    if hasattr(game, '_move_log') and game._move_log:
+        return set(game._move_log)
+    if hasattr(game, 'stones_0'):
+        return game.stones_0 | game.stones_1
+    if hasattr(game, 'board'):
+        return set(game.board.keys())
+    return set()
+
+
+# ---------------------------------------------------------------------------
 # C-engine self-play (combines CGameState + BatchedMCTS)
 # ---------------------------------------------------------------------------
 
@@ -3113,11 +3145,7 @@ def self_play_game_v2(
 
         # --- DISTANT EXPLORATION: force non-adjacent placements early ---
         if PLAY_STYLE == 'distant' and move_count < 15 and random.random() < 0.20:
-            existing = set()
-            if hasattr(game, 'stones_0'):
-                existing = game.stones_0 | game.stones_1
-            elif hasattr(game, 'board'):
-                existing = set(game.board.keys())
+            existing = _get_existing_stones(game)
             if existing:
                 distant = [m for m in game.legal_moves()
                            if not any(abs(m[0]-s[0]) + abs(m[1]-s[1]) <= 1
@@ -3198,11 +3226,7 @@ def self_play_game_v2(
 
     # --- DIVERSITY BONUS: reward games with spread-out stone placement ---
     if PLAY_STYLE == 'distant' and game.total_stones > 10:
-        all_stones = []
-        if hasattr(game, 'stones_0'):
-            all_stones = list(game.stones_0) + list(game.stones_1)
-        elif hasattr(game, 'board'):
-            all_stones = list(game.board.keys())
+        all_stones = list(_get_existing_stones(game))
         if all_stones:
             qs = [s[0] for s in all_stones]
             rs = [s[1] for s in all_stones]
