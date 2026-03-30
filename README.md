@@ -1127,7 +1127,7 @@ The full project (not included in this framework repo) includes a Playwright-bas
 | `examples/dashboard_arena.py` | Dashboard | Watch two bots play with live ELO tracking |
 | `examples/dashboard_train.py` | Dashboard | Train with auto-ELO via bot snapshots |
 | `examples/dashboard_custom_bot.py` | Dashboard | Plug your own bot function into the dashboard |
-| `test_dashboard.py` | Evolution + Dashboard | Full evolutionary bot demo with live visualization |
+| `test_dashboard.py` | Evolution + Dashboard | Evolving bot demo with live visualization (simple, not fully optimized with C engine for readability) |
 
 ## Advanced: Speedup Techniques
 

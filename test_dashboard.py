@@ -10,6 +10,12 @@ and visualize its improvement with the training dashboard.
 The bot starts with random heuristic weights and evolves them through
 tournament selection against a heuristic baseline. Watch the ELO chart
 climb as the bot discovers better weight combinations.
+
+Note: This demo intentionally keeps the bot logic simple for readability.
+It only uses evaluate_moves() for scored candidates. For maximum speed,
+use the full C engine API (alphabeta(), rollout(), find_threats(), etc.)
+which can run 30,000+ games/sec. See examples/evolutionary.py for a
+faster implementation.
 """
 
 import sys
