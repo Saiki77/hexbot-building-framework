@@ -1776,47 +1776,37 @@ def load_online_games(path: str = "online_games.jsonl",
 # ---------------------------------------------------------------------------
 # Symmetry augmentation — hex-valid transforms only
 # ---------------------------------------------------------------------------
-# Hex grids (axial coords) do NOT have 4-fold (90°) symmetry like square grids.
-# Valid transforms for axial (q, r) encoded as grid (i, j):
-#   1. 180° rotation: (i, j) → (N-1-i, N-1-j)  — always valid
-#   2. Flip q-axis:   (i, j) → (N-1-i, j)       — reflect across r
-#   3. Flip r-axis:   (i, j) → (i, N-1-j)        — reflect across q
-# These give 3 augmented samples (original + 3 = 4 total).
-# NOTE: rot90/rot270 are WRONG for hex — they swap q/r which breaks the geometry.
-
-def _augment_transform(state, policy_2d, transform_fn):
-    """Apply a spatial transform to state and policy."""
-    s_new = transform_fn(state)
-    p_new = transform_fn(policy_2d).flatten()
-    ps = p_new.sum()
-    if ps > 0:
-        p_new = p_new / ps
-    return s_new, p_new
-
+# Hex grids in axial coords (q, r) have 3 line directions: (1,0), (0,1), (1,-1).
+# A transform is valid only if it maps this set of directions to itself.
+#
+# Valid transforms on grid (i, j) where i=q, j=r:
+#   1. 180° rotation: (i, j) → (N-1-i, N-1-j)
+#      Maps (1,0)→(-1,0), (0,1)→(0,-1), (1,-1)→(-1,1) ✓
+#   2. Transpose: (i, j) → (j, i)  (reflects across the (1,-1) diagonal)
+#      Maps (1,0)→(0,1), (0,1)→(1,0), (1,-1)→(-1,1) ✓
+#
+# INVALID: single-axis flips break the (1,-1) diagonal direction.
+# INVALID: 90°/270° rotations swap axes with different hex geometry.
 
 def augment_sample(sample: TrainingSample) -> List[TrainingSample]:
     """Apply hex-valid symmetry augmentations.
-    Returns 3 new samples: 180° rotation, q-flip, r-flip."""
+    Returns 2 new samples: 180° rotation and transpose."""
     state = sample.encoded_state.numpy()  # (C, 19, 19)
     policy = sample.policy_target.reshape(BOARD_SIZE, BOARD_SIZE)
-    N = BOARD_SIZE  # 19
     aug = []
 
     transforms = [
         # 180° rotation: flip both axes
-        lambda x: x[..., ::-1, ::-1].copy() if x.ndim == 3
-                  else x[::-1, ::-1].copy(),
-        # Flip q-axis (rows): reflect i
-        lambda x: x[..., ::-1, :].copy() if x.ndim == 3
-                  else x[::-1, :].copy(),
-        # Flip r-axis (cols): reflect j
-        lambda x: x[..., :, ::-1].copy() if x.ndim == 3
-                  else x[:, ::-1].copy(),
+        (lambda s: s[:, ::-1, ::-1].copy(),
+         lambda p: p[::-1, ::-1].copy()),
+        # Transpose: swap i and j (reflect across (1,-1) axis)
+        (lambda s: s.transpose(0, 2, 1).copy(),
+         lambda p: p.T.copy()),
     ]
 
-    for tfn in transforms:
-        s_new = tfn(state)
-        p_new = tfn(policy).flatten()
+    for s_fn, p_fn in transforms:
+        s_new = s_fn(state)
+        p_new = p_fn(policy).flatten()
         ps = p_new.sum()
         if ps > 0:
             p_new = p_new / ps
