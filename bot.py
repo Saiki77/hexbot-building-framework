@@ -78,7 +78,7 @@ NUM_SIMULATIONS = 400
 TEMP_THRESHOLD = 35  # was 20 — explore longer into mid-game where we're weakest
 
 REPLAY_BUFFER_SIZE = 400_000  # 4x larger for diverse experience
-BATCH_SIZE = 256
+BATCH_SIZE = 512
 LEARNING_RATE = 0.001
 L2_REG = 1e-4
 
@@ -2758,7 +2758,7 @@ class BatchedMCTS:
         net,
         c_puct: float = C_PUCT,
         num_simulations: int = NUM_SIMULATIONS,
-        batch_size: int = 8,
+        batch_size: int = 64,
     ):
         self.net = net
         self.c_puct = c_puct

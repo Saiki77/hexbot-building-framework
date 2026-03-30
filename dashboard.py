@@ -871,20 +871,24 @@ class TrainingManager:
 
                 with ProcessPoolExecutor(max_workers=num_workers) as pool:
                     futures = []
-                    # Submit 1 game per future so results stream in as each finishes
-                    all_positions = []
+                    # Batch 4 games per future: balances startup overhead vs streaming
+                    GAMES_PER_FUTURE = 4
+                    flat_positions = []
                     for c, pos in zip(chunks, chunk_positions):
                         for gi in range(c):
-                            p = None
-                            if pos and gi < len(pos):
-                                p = [pos[gi]]
-                            all_positions.append(p)
-                    for pi, pos in enumerate(all_positions):
+                            p = pos[gi] if pos and gi < len(pos) else None
+                            flat_positions.append(p)
+                    for i in range(0, len(flat_positions), GAMES_PER_FUTURE):
+                        batch_pos = flat_positions[i:i+GAMES_PER_FUTURE]
+                        # Wrap in list if positions are provided
+                        pos_arg = [p for p in batch_pos] if any(batch_pos) else None
                         futures.append(
                             pool.submit(_self_play_worker_v2, net_state,
-                                        self._net_config, current_sims, 1, pos,
+                                        self._net_config, current_sims,
+                                        len(batch_pos), pos_arg,
                                         use_alphabeta=False)
                         )
+                    print(f'  │  Dispatching {len(futures)} futures ({GAMES_PER_FUTURE} games each, {num_workers} workers)')
                     for future in as_completed(futures):
                         if self.observer.should_stop():
                             break
