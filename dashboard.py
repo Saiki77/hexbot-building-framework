@@ -1572,17 +1572,29 @@ footer span{white-space:nowrap}
 </header>
 <main>
   <div class="left">
-    <div class="label">Training Game <button id="btn-overlay" onclick="toggleOverlay()" style="font:9px 'Courier New';border:1px solid #000;background:#000;color:#fff;padding:1px 6px;cursor:pointer;margin-left:8px">OVERLAY ON</button></div>
-    <div id="hex-canvas-wrap"><canvas id="hex-canvas"></canvas></div>
-    <div class="game-info" id="game-info">Waiting for training to start...</div>
-    <div id="progress-wrap" style="margin-top:6px;display:none">
+    <div id="live-stats" style="width:100%;padding:0 0 12px 0;font:11px 'SF Mono',monospace;border-bottom:1px solid #eee;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span><b>Iteration</b> <span id="ls-iter">—</span></span>
+        <span><b>Workers</b> <span id="ls-workers">—</span></span>
+        <span><b>Games</b> <span id="ls-games">—</span></span>
+      </div>
+      <div style="display:flex;justify-content:space-between">
+        <span><b>Avg Length</b> <span id="ls-len">—</span></span>
+        <span><b>Win%</b> P0:<span id="ls-w0">—</span> P1:<span id="ls-w1">—</span></span>
+        <span><b>Loss</b> <span id="ls-loss">—</span></span>
+      </div>
+    </div>
+    <div id="progress-wrap" style="width:100%;margin-bottom:8px;display:none">
       <div style="display:flex;align-items:center;gap:8px">
         <div style="flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden">
           <div id="progress-fill" style="height:100%;background:#000;width:0%;transition:width .2s"></div>
         </div>
-        <span id="progress-label" style="font:700 10px 'Courier New';min-width:80px;text-align:right"></span>
+        <span id="progress-label" style="font:700 10px 'Courier New';min-width:100px;text-align:right"></span>
       </div>
     </div>
+    <div class="label">Training Game #<span id="game-num">—</span> <button id="btn-overlay" onclick="toggleOverlay()" style="font:9px 'Courier New';border:1px solid #000;background:#000;color:#fff;padding:1px 6px;cursor:pointer;margin-left:8px">OVERLAY ON</button></div>
+    <div id="hex-canvas-wrap"><canvas id="hex-canvas"></canvas></div>
+    <div class="game-info" id="game-info">Waiting for training to start...</div>
   </div>
   <div class="right">
     <div class="chart-box">
@@ -1725,6 +1737,8 @@ socket.on('live_game_end', d=>{
 socket.on('iteration_start', d=>{
   el('status').textContent='ITER '+d.iteration+'/'+d.total;
   el('s-itertotal').textContent=d.total;
+  el('ls-iter').textContent=d.iteration;
+  gameStats={w0:0,w1:0,totalLen:0,count:0};
 });
 socket.on('iteration_complete', d=>{
   updateStats(d); fetchCharts();
@@ -1737,43 +1751,69 @@ socket.on('training_complete', ()=>{
   el('status').textContent='COMPLETE';
   el('btn-start').classList.remove('active');
 });
-let replayTimer=null;
+// --- Game replay system ---
+let replayTimer=null, replayBusy=false, pendingGame=null;
+let gameStats={w0:0,w1:0,totalLen:0,count:0};
+
+function replayGame(d){
+  replayBusy=true;
+  stones0=[]; stones1=[]; candidates=[];
+  drawHex();
+  el('game-num').textContent=d.game_idx;
+  let mi=0, curPlayer=0, stonesInTurn=0;
+  const moves=d.moves;
+  setInfo('Game #'+d.game_idx+' playing... ('+moves.length+' moves)');
+  replayTimer=setInterval(()=>{
+    if(mi>=moves.length){
+      clearInterval(replayTimer); replayTimer=null;
+      const winner=d.result>0?'P0 (black)':'P1 (white)';
+      setInfo('Game #'+d.game_idx+': '+winner+' wins in '+moves.length+' moves');
+      // Hold final position for 1.5s then show next queued game
+      setTimeout(()=>{
+        replayBusy=false;
+        if(pendingGame){const g=pendingGame; pendingGame=null; replayGame(g);}
+      },1500);
+      return;
+    }
+    const m=moves[mi];
+    if(curPlayer===0) stones0.push(m); else stones1.push(m);
+    mi++; stonesInTurn++;
+    // Turn structure: first move is 1 stone, then 2 each
+    const needed=(mi<=1)?1:2;
+    if(stonesInTurn>=needed){curPlayer=1-curPlayer; stonesInTurn=0;}
+    drawHex();
+    setInfo('Game #'+d.game_idx+' — Move '+mi+'/'+moves.length);
+  },120);
+}
+
 socket.on('game_complete', d=>{
   el('status').textContent='ITER '+el('s-iter').textContent+' G'+d.game_idx+'/'+d.total_games;
-  const pw=el('progress-wrap'), pf=el('progress-fill'), pl=el('progress-label');
-  pw.style.display='';
-  const pct=Math.round(d.game_idx/d.total_games*100);
-  pf.style.width=pct+'%';
-  pl.textContent='Self-play '+d.game_idx+'/'+d.total_games;
-  // Replay this training game client-side
+  // Progress bar
+  el('progress-wrap').style.display='';
+  el('progress-fill').style.width=Math.round(d.game_idx/d.total_games*100)+'%';
+  el('progress-label').textContent='Self-play '+d.game_idx+'/'+d.total_games;
+  // Update live stats
+  gameStats.count++;
+  gameStats.totalLen+=d.num_moves;
+  if(d.result>0) gameStats.w0++; else if(d.result<0) gameStats.w1++;
+  el('ls-games').textContent=d.game_idx+'/'+d.total_games;
+  el('ls-len').textContent=Math.round(gameStats.totalLen/gameStats.count);
+  el('ls-w0').textContent=Math.round(gameStats.w0/gameStats.count*100)+'%';
+  el('ls-w1').textContent=Math.round(gameStats.w1/gameStats.count*100)+'%';
+  // Queue or play game replay
   if(d.moves && d.moves.length>0){
-    if(replayTimer) clearInterval(replayTimer);
-    stones0=[]; stones1=[]; candidates=[];
-    let mi=0, pl0=0, stt=0;
-    const mv=d.moves;
-    setInfo('Training game '+d.game_idx+'...');
-    replayTimer=setInterval(()=>{
-      if(mi>=mv.length){
-        clearInterval(replayTimer); replayTimer=null;
-        const w=d.result>0?'P0':'P1';
-        setInfo('Game '+d.game_idx+': '+w+' wins ('+mv.length+' moves)');
-        return;
-      }
-      const m=mv[mi];
-      if(pl0===0) stones0.push(m); else stones1.push(m);
-      mi++; stt++;
-      const need=(stones0.length+stones1.length<=1)?1:2;
-      if(stt>=need){pl0=1-pl0; stt=0;}
-      drawHex();
-      setInfo('Game '+d.game_idx+' — Move '+mi+'/'+mv.length);
-    },120);
+    if(replayBusy){
+      pendingGame=d;  // queue latest, plays after current finishes
+    } else {
+      replayGame(d);
+    }
   }
 });
 socket.on('train_progress', d=>{
-  const pw=el('progress-wrap'), pf=el('progress-fill'), pl=el('progress-label');
-  pw.style.display='';
-  pf.style.width=d.pct+'%';
-  pl.textContent='Training '+d.step+'/'+d.total+' (loss '+d.loss+')';
+  el('progress-wrap').style.display='';
+  el('progress-fill').style.width=d.pct+'%';
+  el('progress-label').textContent='Training '+d.step+'/'+d.total+' (loss '+d.loss+')';
+  el('ls-loss').textContent=d.loss;
 });
 
 function el(id){return document.getElementById(id)}
@@ -1781,6 +1821,7 @@ function setInfo(t){el('game-info').textContent=t}
 
 function updateStats(d){
   el('s-iter').textContent=d.iteration;
+  el('ls-iter').textContent=d.iteration;
   const t=d.wins[0]+d.wins[1]+d.wins[2]||1;
   el('s-w0').textContent=Math.round(d.wins[0]/t*100);
   el('s-w1').textContent=Math.round(d.wins[1]/t*100);
@@ -1788,9 +1829,10 @@ function updateStats(d){
   el('s-sp').textContent=d.self_play_time;
   el('s-buffer').textContent=d.buffer_size.toLocaleString();
   if(d.elo) el('s-elo').textContent=Math.round(d.elo);
-  if(d.workers) el('s-workers').textContent=d.workers;
+  if(d.workers) {el('s-workers').textContent=d.workers; el('ls-workers').textContent=d.workers;}
   if(d.sims) el('s-sims').textContent=d.sims;
   if(d.lr) el('s-lr').textContent=d.lr.toFixed(4);
+  if(d.loss) el('ls-loss').textContent=d.loss.total.toFixed(4);
   if(d.cpu_pct!=null){
     el('s-cpu').textContent=Math.round(d.cpu_pct);
     el('cpu-fill').style.width=Math.round(d.cpu_pct)+'%';
