@@ -426,12 +426,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <title>HEX BOT</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#fff;color:#000;font-family:'SF Mono','Courier New',monospace;font-size:13px;line-height:1.5}
+body{background:#fff;color:#000;font-family:'SF Mono','Courier New',monospace;font-size:13px;line-height:1.5;
+  display:flex;flex-direction:column;height:100vh;overflow:hidden}
 header{border-bottom:1px solid #000;padding:14px 24px;display:flex;align-items:center;gap:20px}
 .title{font-size:15px;font-weight:700;letter-spacing:4px;text-transform:uppercase}
 .status{margin-left:auto;letter-spacing:3px;font-size:11px;font-weight:700}
-main{display:flex;border-bottom:1px solid #000;min-height:calc(100vh - 130px)}
-.left{width:50%;border-right:1px solid #000;padding:20px;display:flex;flex-direction:column;align-items:center}
+main{display:flex;flex:1;overflow:hidden}
+.left{width:50%;border-right:1px solid #000;padding:20px;display:flex;flex-direction:column;align-items:center;overflow:hidden}
 .right{width:50%;display:flex;flex-direction:column;overflow-y:auto}
 .chart-box{padding:16px 20px;border-bottom:1px solid #000;display:flex;flex-direction:column}
 .chart-box:last-child{border-bottom:none}
@@ -468,12 +469,17 @@ footer span{white-space:nowrap}
 .settings-row label{width:110px;font-weight:700;flex-shrink:0}
 .settings-row input[type=range]{flex:1;accent-color:#000}
 .settings-row span.val{width:50px;text-align:right;font-size:10px}
+.gh-item{cursor:pointer;padding:2px 4px;border-radius:2px;display:inline-block;margin:1px}
+.gh-item:hover{background:#eee}
+.gh-item.active{background:#000;color:#fff}
+.conn-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:8px;vertical-align:middle}
 </style>
 </head>
 <body>
 <header>
   <span class="title">Hex Bot Training</span>
   <span class="status" id="status">IDLE</span>
+  <span class="conn-dot" id="conn-dot" style="background:#ccc" title="Disconnected"></span>
   <span class="settings-btn" onclick="toggleSettings()">&#9881;</span>
 </header>
 <div id="settings-panel" class="settings-panel" style="display:none">
@@ -495,6 +501,11 @@ footer span{white-space:nowrap}
     <input type="range" id="set-radius" min="1" max="4" value="2" step="1"
       oninput="saveSetting('emptyHexRadius',+this.value);el('set-radius-val').textContent=this.value;drawHex()">
     <span class="val" id="set-radius-val">2</span>
+  </div>
+  <div class="settings-row">
+    <label>Move numbers</label>
+    <input type="checkbox" id="set-movenums" checked
+      onchange="saveSetting('showMoveNums',this.checked);drawHex()">
   </div>
   <div class="settings-row">
     <label>Auto-refresh</label>
@@ -529,6 +540,12 @@ footer span{white-space:nowrap}
     </div>
     <div id="hex-canvas-wrap"><canvas id="hex-canvas"></canvas></div>
     <div class="game-info" id="game-info">Waiting for games...</div>
+    <div id="game-history" style="width:100%;margin-top:8px;max-height:80px;overflow-y:auto;
+      font:10px 'SF Mono',monospace;border-top:1px solid #eee;padding-top:6px">
+    </div>
+    <div style="font:9px 'SF Mono',monospace;color:#aaa;margin-top:4px">
+      Space: pause/resume &middot; &larr;/&rarr;: step &middot; R: restart game
+    </div>
   </div>
   <div class="right">
     <div class="chart-box" id="box-elo">
@@ -601,10 +618,14 @@ footer span{white-space:nowrap}
 // ---------------------------------------------------------------------------
 const DPR = window.devicePixelRatio || 1;
 const socket = io();
-socket.on('connect', () => console.log('Socket connected:', socket.id));
-socket.on('disconnect', () => console.log('Socket disconnected'));
+socket.on('connect', () => {
+  el('conn-dot').style.background = '#0a0'; el('conn-dot').title = 'Connected';
+});
+socket.on('disconnect', () => {
+  el('conn-dot').style.background = '#c00'; el('conn-dot').title = 'Disconnected';
+});
 
-let stones0 = [], stones1 = [];
+let stones0 = [], stones1 = [], moveOrder = [];  // moveOrder[i] = {q, r, num, player}
 
 function el(id) { return document.getElementById(id); }
 function setInfo(t) { el('game-info').textContent = t; }
@@ -651,7 +672,7 @@ const HEX_SIZE = 18;
 const S3 = Math.sqrt(3);
 
 // Settings (persisted to localStorage)
-const defaultSettings = { replaySpeed: 120, dotSize: 2, emptyHexRadius: 2, autoRefresh: true };
+const defaultSettings = { replaySpeed: 120, dotSize: 2, emptyHexRadius: 2, autoRefresh: true, showMoveNums: true };
 let settings = Object.assign({}, defaultSettings);
 try { const s = JSON.parse(localStorage.getItem('hexdash_settings')); if (s) Object.assign(settings, s); } catch(e) {}
 function saveSetting(key, val) { settings[key] = val; localStorage.setItem('hexdash_settings', JSON.stringify(settings)); }
@@ -753,6 +774,18 @@ function drawHex() {
     }
     ctx.restore();
   }
+
+  // Move numbers on stones
+  if (settings.showMoveNums && moveOrder.length) {
+    const fontSize = Math.max(7, Math.min(12, hr * 0.7));
+    ctx.font = 'bold ' + fontSize + 'px Courier New';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const mv of moveOrder) {
+      const [sx, sy] = toS(mv.q, mv.r);
+      ctx.fillStyle = mv.player === 0 ? '#fff' : '#000';
+      ctx.fillText(mv.num, sx, sy);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +796,9 @@ let gameStats = { w0: 0, w1: 0, totalLen: 0, count: 0 };
 
 function replayGame(d) {
   replayBusy = true;
-  stones0 = []; stones1 = [];
+  replayPaused = false;
+  currentGameData = d;
+  stones0 = []; stones1 = []; moveOrder = [];
   drawHex();
   el('game-num').textContent = d.game_idx;
   let mi = 0, curPlayer = 0, stonesInTurn = 0;
@@ -782,6 +817,7 @@ function replayGame(d) {
     }
     const m = moves[mi];
     if (curPlayer === 0) stones0.push(m); else stones1.push(m);
+    moveOrder.push({ q: m[0], r: m[1], num: mi + 1, player: curPlayer });
     mi++; stonesInTurn++;
     // Turn structure: first move is 1 stone, then 2 each
     const needed = (mi <= 1) ? 1 : 2;
@@ -789,6 +825,53 @@ function replayGame(d) {
     drawHex();
     setInfo('Game #' + d.game_idx + ' \u2014 Move ' + mi + '/' + moves.length);
   }, settings.replaySpeed);
+}
+
+// ---------------------------------------------------------------------------
+// Pause / step / keyboard controls
+// ---------------------------------------------------------------------------
+let replayPaused = false, currentGameData = null;
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); togglePause(); }
+  if (e.code === 'KeyR' && currentGameData) { replayGame(currentGameData); }
+});
+
+function togglePause() {
+  if (!replayTimer && !replayPaused) return;
+  if (replayPaused) {
+    // Resume
+    replayPaused = false;
+    if (currentGameData) replayGame(currentGameData);
+  } else {
+    // Pause
+    replayPaused = true;
+    if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+    setInfo(el('game-info').textContent + ' [PAUSED]');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Game history
+// ---------------------------------------------------------------------------
+const gameHistoryList = [];  // store last 20 games
+
+function addToHistory(d) {
+  gameHistoryList.push(d);
+  if (gameHistoryList.length > 20) gameHistoryList.shift();
+  const histEl = el('game-history');
+  if (!histEl) return;
+  histEl.innerHTML = '';
+  gameHistoryList.forEach((g, i) => {
+    const span = document.createElement('span');
+    span.className = 'gh-item' + (g === currentGameData ? ' active' : '');
+    const w = g.result > 0 ? 'B' : 'W';
+    span.textContent = '#' + g.game_idx + ' ' + w + ' ' + g.num_moves + 'mv';
+    span.onclick = () => { replayPaused = false; replayGame(g); };
+    histEl.appendChild(span);
+  });
+  histEl.scrollTop = histEl.scrollHeight;
 }
 
 // ---------------------------------------------------------------------------
@@ -821,7 +904,8 @@ socket.on('game_complete', d => {
     if (lsW0) lsW0.textContent = Math.round(gameStats.w0 / gameStats.count * 100) + '%';
     const lsW1 = el('ls-w1');
     if (lsW1) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
-    // Queue or play replay
+    // Add to history and queue or play replay
+    addToHistory(d);
     if (replayBusy) {
       pendingGame = d;
     } else {
@@ -1035,6 +1119,7 @@ window.addEventListener('resize', () => {
   el('set-dotsize-val').textContent = settings.dotSize;
   el('set-radius').value = settings.emptyHexRadius;
   el('set-radius-val').textContent = settings.emptyHexRadius;
+  el('set-movenums').checked = settings.showMoveNums;
   el('set-autorefresh').checked = settings.autoRefresh;
 })();
 setTimeout(() => { drawHex(); fetchCharts(); }, 100);
