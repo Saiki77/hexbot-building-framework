@@ -539,9 +539,30 @@ class DashboardObserver:
             'result': result,
             'num_moves': len(move_history),
         })
-        # Send latest game to live display (always replaces previous)
-        if hasattr(self, '_live_broadcaster') and self._live_broadcaster:
-            self._live_broadcaster.set_latest_game(move_history, result)
+        # Replay this game in the dashboard (uses socketio background task)
+        self.sio.start_background_task(
+            self._replay_game, list(move_history), result)
+
+    def _replay_game(self, move_history, result):
+        """Replay a training game move-by-move in the dashboard."""
+        game = HexGame(candidate_radius=3, max_total_stones=200)
+        self.sio.emit('live_game_start', {})
+        for i, move in enumerate(move_history):
+            q, r = move if isinstance(move, (list, tuple)) else (move[0], move[1])
+            player = game.current_player
+            game.place_stone(q, r)
+            self.sio.emit('live_game_move', {
+                'move': [q, r], 'player': player, 'move_num': i + 1,
+                'stones_0': [list(s) for s in game.stones_0],
+                'stones_1': [list(s) for s in game.stones_1],
+                'candidates': [list(c) for c in list(game.candidates)[:80]],
+                'value': round(result, 3), 'current_player': player,
+                'top_moves_current': [], 'top_moves_opponent': [],
+            })
+            self.sio.sleep(0.12)
+        self.sio.emit('live_game_end', {
+            'winner': game.winner, 'total_moves': len(move_history),
+        })
 
     def on_iteration_complete(self, metrics: dict) -> None:
         self.metrics.add_iteration(metrics)
@@ -1233,78 +1254,6 @@ class BackgroundScraper:
 # Live game broadcaster
 # ---------------------------------------------------------------------------
 
-class LiveGameBroadcaster:
-    """Replays latest training game move-by-move in the dashboard."""
-
-    def __init__(self, sio: SocketIO, tm: TrainingManager):
-        self.sio = sio
-        self.tm = tm
-        self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
-        self._latest_game = None  # (move_history, result)
-        self._lock = threading.Lock()
-
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-
-    def set_latest_game(self, move_history: list, result: float):
-        """Called when any training game finishes — replaces the previous one."""
-        with self._lock:
-            self._latest_game = (move_history, result)
-
-    def _loop(self):
-        while not self._stop.is_set():
-            game_data = None
-            with self._lock:
-                if self._latest_game is not None:
-                    game_data = self._latest_game
-                    self._latest_game = None
-            if game_data:
-                self._replay_game(game_data[0], game_data[1])
-            else:
-                time.sleep(0.2)
-
-    def _replay_game(self, move_history: list, result: float):
-        """Replay the latest training game move-by-move."""
-        game = HexGame(candidate_radius=3, max_total_stones=200)
-        self.sio.emit('live_game_start', {})
-
-        for move_num, move in enumerate(move_history):
-            if self._stop.is_set():
-                break
-            # If a newer game arrived, skip to it
-            with self._lock:
-                if self._latest_game is not None:
-                    break
-            q, r = move if isinstance(move, (list, tuple)) else (move[0], move[1])
-            player = game.current_player
-            game.place_stone(q, r)
-
-            self.sio.emit('live_game_move', {
-                'move': [q, r],
-                'player': player,
-                'move_num': move_num + 1,
-                'stones_0': [list(s) for s in game.stones_0],
-                'stones_1': [list(s) for s in game.stones_1],
-                'candidates': [list(c) for c in list(game.candidates)[:80]],
-                'value': round(result, 3),
-                'current_player': player,
-                'top_moves_current': [],
-                'top_moves_opponent': [],
-            })
-            time.sleep(0.12)
-
-        self.sio.emit('live_game_end', {
-            'winner': game.winner,
-            'total_moves': len(move_history),
-        })
 
 
 # ---------------------------------------------------------------------------
@@ -1319,9 +1268,6 @@ resource_monitor = ResourceMonitor()  # auto-detects CPU count, sets threads
 metrics_store = MetricsStore()
 observer = DashboardObserver(metrics_store, socketio)
 training_mgr = TrainingManager(metrics_store, observer, socketio, resource_monitor)
-live_broadcaster = LiveGameBroadcaster(socketio, training_mgr)
-observer._live_broadcaster = live_broadcaster  # wire up game replay
-live_broadcaster.start()  # always running, waits for games to arrive
 
 # Start gentle background scraper
 bg_scraper = BackgroundScraper(os.path.join(os.path.dirname(__file__), 'human_games.jsonl'))
@@ -1415,7 +1361,6 @@ def train_start():
         train_steps=data.get('train_steps', 400),
     )
     if ok:
-        live_broadcaster.start()
         return jsonify({'status': 'started'})
     return jsonify({'status': 'already_running'}), 409
 
@@ -1423,7 +1368,6 @@ def train_start():
 @app.route('/api/train/stop', methods=['POST'])
 def train_stop():
     training_mgr.stop()
-    live_broadcaster.stop()
     return jsonify({'status': 'stopping'})
 
 
