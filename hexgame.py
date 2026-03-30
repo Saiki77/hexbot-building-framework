@@ -1,5 +1,5 @@
 """
-hexgame — Clean Python API for the Hex Connect-6 C Engine
+hexgame - Clean Python API for the Hex Connect-6 C Engine
 
 A fast hexagonal tic-tac-toe (Connect-6 on hex grid) game engine.
 Uses a compiled C backend for speed (~50-100x faster than pure Python).
@@ -158,7 +158,7 @@ _OFF = 15  # board offset (axial 0 maps to index 15)
 
 
 # ---------------------------------------------------------------------------
-# HexGame — the public API
+# HexGame - the public API
 # ---------------------------------------------------------------------------
 
 class HexGame:
@@ -503,7 +503,7 @@ class HexGame:
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    print("hexgame — Hex Connect-6 Engine")
+    print("hexgame - Hex Connect-6 Engine")
     print("=" * 40)
 
     g = HexGame()

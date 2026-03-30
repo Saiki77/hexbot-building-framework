@@ -31,7 +31,6 @@ __pycache__/
 benchmark*.py
 dashboard_old.py
 dashboard_clean.py
-train_dashboard.py
 browser_player.py
 online_player.py
 scrape_games.py
@@ -41,3 +40,4 @@ triangle/
 strategy_doc.pdf
 PROJECT_SUMMARY.md
 STRATEGY.md
+media/

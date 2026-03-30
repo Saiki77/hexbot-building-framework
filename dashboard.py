@@ -1325,7 +1325,7 @@ window.addEventListener('resize', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Init — restore settings from localStorage
+// Init - restore settings from localStorage
 // ---------------------------------------------------------------------------
 (function initSettings() {
   el('set-speed').value = settings.replaySpeed;

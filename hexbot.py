@@ -1,5 +1,5 @@
 """
-hexbot — Python framework for building Hex Connect-6 bots.
+hexbot - Python framework for building Hex Connect-6 bots.
 
 Simple API for playing, training, and evaluating hex bots:
 
@@ -31,14 +31,28 @@ from typing import Dict, List, Optional, Tuple
 from hexgame import HexGame
 
 __all__ = [
-    'HexGame', 'Bot', 'BotProtocol', 'Arena', 'ArenaResult', 'train',
+    # Game
+    'HexGame', 'FastGame',
+    # Analysis
     'evaluate_moves', 'find_threats', 'find_winning_moves',
     'count_lines', 'rollout', 'alphabeta',
+    # Advanced threats
+    'find_forced_move', 'threat_search', 'count_threats', 'detect_fork',
+    # Neural network
+    'nn_evaluate', 'nn_evaluate_batch', 'create_network', 'encode_state', 'decode_policy',
+    # Search
+    'mcts_search', 'mcts_policy',
+    # Training
+    'TrainingSample', 'ReplayBuffer', 'self_play', 'train_step', 'augment_sample',
+    # Bot framework
+    'Bot', 'BotProtocol', 'Arena', 'ArenaResult', 'train',
+    # Data
+    'positions', 'load_games', 'generate_puzzles',
 ]
 
 
 # ---------------------------------------------------------------------------
-# Raw analysis functions — use these to build ANY bot approach
+# Raw analysis functions - use these to build ANY bot approach
 # ---------------------------------------------------------------------------
 
 def evaluate_moves(game, top_n: int = 10) -> List[Tuple[Tuple[int, int], int]]:
@@ -161,14 +175,430 @@ def alphabeta(game, depth: int = 8) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# BotProtocol — implement this to make any custom bot work with Arena
+# Fast game state (C engine, ~10x faster than HexGame for self-play)
+# ---------------------------------------------------------------------------
+
+def FastGame(max_stones: int = 200):
+    """Create a fast C-engine game state for self-play.
+
+    10x faster than HexGame for encode/decode and move generation.
+    Same API: place_stone(q,r), undo(), legal_moves(), is_terminal, etc.
+
+    Example:
+        game = FastGame()
+        game.place_stone(0, 0)
+        print(game.current_player, game.total_stones)
+    """
+    from bot import CGameState
+    return CGameState(max_total_stones=max_stones)
+
+
+# ---------------------------------------------------------------------------
+# Advanced threat analysis
+# ---------------------------------------------------------------------------
+
+def find_forced_move(game) -> Optional[Tuple[int, int]]:
+    """Find an undeniable forced move (instant win or must-block).
+
+    Skips neural network entirely - pure tactical detection.
+    Returns None if no forced move exists.
+
+    Example:
+        move = find_forced_move(game)
+        if move:
+            game.place(*move)  # must play this or lose
+    """
+    from bot import find_forced_move as _ffm
+    from main import HexGame as _PyGame
+    if isinstance(game, HexGame) and not hasattr(game, 'stones_0'):
+        pg = _PyGame(candidate_radius=3, max_total_stones=200)
+        for q, r in game.moves:
+            pg.place_stone(q, r)
+        return _ffm(pg)
+    return _ffm(game)
+
+
+def threat_search(game, depth: int = 4) -> Optional[Tuple[int, int]]:
+    """Search for winning threat sequences (forks, double attacks).
+
+    Looks depth moves ahead for unstoppable forcing sequences.
+    More expensive than find_forced_move but finds deeper tactics.
+
+    Returns the first move of the winning sequence, or None.
+
+    Example:
+        move = threat_search(game, depth=6)
+        if move:
+            print("Found winning sequence starting with", move)
+    """
+    from bot import _threat_search
+    from main import HexGame as _PyGame
+    # Convert hexgame.HexGame to main.HexGame if needed
+    if isinstance(game, HexGame) and not hasattr(game, 'stones_0'):
+        pg = _PyGame(candidate_radius=3, max_total_stones=200)
+        for q, r in game.moves:
+            pg.place_stone(q, r)
+        return _threat_search(pg, depth=depth)
+    return _threat_search(game, depth=depth)
+
+
+def count_threats(game, player: Optional[int] = None) -> int:
+    """Count cells where player can complete 6-in-a-row.
+
+    If 3+, the position is likely unstoppable (opponent can only block 2 per turn).
+
+    Example:
+        n = count_threats(game, player=0)
+        if n >= 3:
+            print("Player 0 has an unstoppable position!")
+    """
+    p = player if player is not None else game.current_player
+    if hasattr(game, '_lib'):
+        return game._lib.board_count_winning_moves(game._ptr, p)
+    return len(find_winning_moves(game, player=p))
+
+
+def detect_fork(game, player: Optional[int] = None) -> bool:
+    """Check if player has 3+ winning cells (unstoppable fork).
+
+    In Connect-6, each player places 2 stones per turn, so they can
+    only block 2 threats. 3+ threats = guaranteed win.
+
+    Example:
+        if detect_fork(game, player=0):
+            print("Player 0 wins by force!")
+    """
+    return count_threats(game, player) >= 3
+
+
+# ---------------------------------------------------------------------------
+# Neural network access
+# ---------------------------------------------------------------------------
+
+def create_network(config: str = 'standard'):
+    """Create a neural network for position evaluation.
+
+    Configs:
+        'fast'              - 64 filters, 4 blocks (~500K params, quick experiments)
+        'standard'          - 128 filters, 12 blocks (~3.9M params, default)
+        'large'             - 256 filters, 12 blocks (~15M params, stronger but slow)
+        'orca-transformer'  - 128 filters + transformer attention (~4.3M, experimental)
+
+    Example:
+        net = create_network('standard')
+        print(sum(p.numel() for p in net.parameters()))  # 3,909,308
+    """
+    from bot import create_network as _cn
+    return _cn(config)
+
+
+def encode_state(game):
+    """Encode a game state as a tensor for neural network input.
+
+    Returns (tensor, offset_q, offset_r) where tensor is (7, 19, 19):
+        Channel 0: current player's stones
+        Channel 1: opponent's stones
+        Channel 2: legal move positions
+        Channel 3: current player indicator
+        Channel 4: stones remaining this turn
+        Channel 5: current player's threat map
+        Channel 6: opponent's threat map
+
+    Example:
+        tensor, oq, orr = encode_state(game)
+        print(tensor.shape)  # torch.Size([7, 19, 19])
+    """
+    # CGameState from bot.py has _move_log attribute
+    if hasattr(game, '_move_log'):
+        from bot import c_encode_state
+        return c_encode_state(game)
+    # hexgame.HexGame or main.HexGame - use Python encoder
+    if isinstance(game, HexGame) and not hasattr(game, 'stones_0'):
+        from main import HexGame as _PyGame
+        pg = _PyGame(candidate_radius=3, max_total_stones=200)
+        for q, r in game.moves:
+            pg.place_stone(q, r)
+        from bot import encode_state as _enc
+        return _enc(pg)
+    from bot import encode_state as _enc
+    return _enc(game)
+
+
+def decode_policy(policy_logits, game, offset_q: int, offset_r: int) -> Dict:
+    """Convert raw policy logits to a move probability dictionary.
+
+    Takes the 361-dim output from the policy head and maps it back
+    to legal (q, r) moves with softmax probabilities.
+
+    Example:
+        tensor, oq, orr = encode_state(game)
+        logits, value = net.forward_pv(tensor.unsqueeze(0))
+        policy = decode_policy(logits[0], game, oq, orr)
+        best_move = max(policy, key=policy.get)
+    """
+    if hasattr(game, '_move_log'):
+        from bot import c_decode_policy
+        return c_decode_policy(policy_logits, game, offset_q, offset_r)
+    if isinstance(game, HexGame) and not hasattr(game, 'stones_0'):
+        from main import HexGame as _PyGame
+        pg = _PyGame(candidate_radius=3, max_total_stones=200)
+        for q, r in game.moves:
+            pg.place_stone(q, r)
+        from bot import decode_policy as _dec
+        return _dec(policy_logits, pg, offset_q, offset_r)
+    from bot import decode_policy as _dec
+    return _dec(policy_logits, game, offset_q, offset_r)
+
+
+def nn_evaluate(game, net=None):
+    """Evaluate a position with the neural network.
+
+    Returns (policy_dict, value) where policy_dict maps (q,r) to probability
+    and value is a float in [-1, +1] (positive = current player winning).
+
+    If net is None, loads the default Orca checkpoint.
+
+    Example:
+        policy, value = nn_evaluate(game)
+        print(f"Value: {value:.3f}")
+        print(f"Best move: {max(policy, key=policy.get)}")
+    """
+    import torch
+    if net is None:
+        bot = Bot.orca(sims=1)
+        net = bot._net
+    net.eval()
+    tensor, oq, orr = encode_state(game)
+    with torch.no_grad():
+        p_logits, v = net.forward_pv(tensor.unsqueeze(0))
+    policy = decode_policy(p_logits[0], game, oq, orr)
+    value = v.item()
+    return policy, value
+
+
+def nn_evaluate_batch(games, net=None):
+    """Batch evaluate multiple positions with the neural network.
+
+    Much faster than calling nn_evaluate() in a loop.
+    Returns list of (policy_dict, value) tuples.
+
+    Example:
+        results = nn_evaluate_batch([game1, game2, game3], net=my_net)
+        for policy, value in results:
+            print(f"Value: {value:.3f}")
+    """
+    import torch
+    if net is None:
+        bot = Bot.orca(sims=1)
+        net = bot._net
+    net.eval()
+    encoded = [encode_state(g) for g in games]
+    tensors = torch.stack([e[0] for e in encoded])
+    with torch.no_grad():
+        p_logits, v = net.forward_pv(tensors)
+    results = []
+    for i, (_, oq, orr) in enumerate(encoded):
+        policy = decode_policy(p_logits[i], games[i], oq, orr)
+        results.append((policy, v[i].item()))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Search (MCTS with full control)
+# ---------------------------------------------------------------------------
+
+def _to_mcts_game(game):
+    """Convert hexgame.HexGame to a format MCTS can use."""
+    if hasattr(game, '_move_log') or hasattr(game, 'stones_0'):
+        return game  # already CGameState or main.HexGame
+    from bot import CGameState
+    cg = CGameState(max_total_stones=200)
+    for q, r in game.moves:
+        cg.place_stone(q, r)
+    return cg
+
+
+def mcts_search(game, net=None, sims: int = 200, batch_size: int = 64):
+    """Run MCTS search and return the full visit count distribution.
+
+    Returns dict mapping (q, r) -> visit_count (raw integers, not normalized).
+    Use this for custom move selection strategies.
+
+    Example:
+        visits = mcts_search(game, sims=400)
+        # Pick move with most visits
+        best = max(visits, key=visits.get)
+        # Or sample proportionally
+        total = sum(visits.values())
+        probs = {m: v/total for m, v in visits.items()}
+    """
+    from bot import BatchedMCTS
+    if net is None:
+        bot = Bot.orca(sims=1)
+        net = bot._net
+    net.eval()
+    mcts = BatchedMCTS(net, num_simulations=sims, batch_size=batch_size)
+    return mcts.search(_to_mcts_game(game), temperature=0.01, add_noise=False)
+
+
+def mcts_policy(game, net=None, sims: int = 200, temperature: float = 1.0,
+                add_noise: bool = False):
+    """Run MCTS and return move probability distribution.
+
+    With temperature=1.0, probabilities are proportional to visit counts.
+    With temperature->0, concentrates on the best move (greedy).
+
+    Example:
+        # For training (explore):
+        policy = mcts_policy(game, temperature=1.0, add_noise=True)
+        # For play (exploit):
+        policy = mcts_policy(game, temperature=0.01)
+    """
+    from bot import BatchedMCTS
+    if net is None:
+        bot = Bot.orca(sims=1)
+        net = bot._net
+    net.eval()
+    mcts = BatchedMCTS(net, num_simulations=sims, batch_size=64)
+    return mcts.search(_to_mcts_game(game), temperature=temperature, add_noise=add_noise)
+
+
+# ---------------------------------------------------------------------------
+# Training building blocks
+# ---------------------------------------------------------------------------
+
+# Lazy imports to avoid loading PyTorch for basic game usage
+_training_imports_done = False
+TrainingSample = None
+ReplayBuffer = None
+
+
+def _ensure_training_imports():
+    global _training_imports_done, TrainingSample, ReplayBuffer
+    if _training_imports_done:
+        return
+    from bot import TrainingSample as _TS, ReplayBuffer as _RB
+    TrainingSample = _TS
+    ReplayBuffer = _RB
+    _training_imports_done = True
+
+
+def self_play(net=None, sims: int = 200, batch_size: int = 64, use_c_engine: bool = True):
+    """Generate one game of self-play training data.
+
+    Returns (samples, move_history) where samples is a list of TrainingSample
+    and move_history is the list of (q, r) moves played.
+
+    Example:
+        samples, moves = self_play(net=my_net, sims=100)
+        print(f"Game: {len(moves)} moves, {len(samples)} training samples")
+        for s in samples:
+            replay_buffer.push(s)
+    """
+    from bot import BatchedMCTS, self_play_game_v2
+    if net is None:
+        bot = Bot.orca(sims=1)
+        net = bot._net
+    net.eval()
+    mcts = BatchedMCTS(net, num_simulations=sims, batch_size=batch_size)
+    return self_play_game_v2(net, mcts, use_c_engine=use_c_engine)
+
+
+def train_step(net, optimizer, replay_buffer, device=None):
+    """Run one training step (forward + backward + optimizer step).
+
+    Returns dict with loss values: {'total', 'value', 'policy', 'threat'}.
+
+    Example:
+        optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
+        for step in range(200):
+            losses = train_step(net, optimizer, buffer, device='mps')
+            if step % 50 == 0:
+                print(f"Step {step}: loss={losses['total']:.4f}")
+    """
+    from bot import train_step as _ts, get_device
+    if device is None:
+        device = get_device()
+    elif isinstance(device, str):
+        import torch
+        device = torch.device(device)
+    return _ts(net, optimizer, replay_buffer, device)
+
+
+def augment_sample(sample):
+    """Apply hex-valid symmetry augmentations to a training sample.
+
+    Returns 3 augmented copies (180 rotation, transpose, transpose+180).
+    All transforms preserve the 3 hex line directions.
+
+    Example:
+        samples, moves = self_play(net)
+        for s in samples:
+            buffer.push(s)
+            for aug in augment_sample(s):
+                buffer.push(aug)
+    """
+    from bot import augment_sample as _aug
+    return _aug(sample)
+
+
+# ---------------------------------------------------------------------------
+# Curriculum and data loading
+# ---------------------------------------------------------------------------
+
+def load_games(path: str):
+    """Load training samples from a JSONL game file.
+
+    Each line should be a JSON object with 'moves' (list of [q,r])
+    and optional 'winner' (0 or 1).
+
+    Returns list of TrainingSample objects ready for a replay buffer.
+    """
+    from bot import load_human_games
+    return load_human_games(path)
+
+
+def generate_puzzles(n: int = 100):
+    """Generate random tactical puzzle positions for curriculum training.
+
+    Returns list of (position_dict, hint_moves) tuples.
+    Useful for teaching bots to handle endgame tactics.
+
+    Example:
+        puzzles = generate_puzzles(50)
+        for pos, hints in puzzles:
+            game = HexGame.from_dict(pos)
+            # Train on this position...
+    """
+    from bot import generate_puzzles as _gp
+    return _gp(n)
+
+
+# Pre-built starting positions for curriculum learning
+positions = None
+
+
+def _load_positions():
+    global positions
+    if positions is not None:
+        return positions
+    try:
+        from bot import POSITION_CATALOG
+        positions = POSITION_CATALOG
+    except ImportError:
+        positions = {}
+    return positions
+
+
+# ---------------------------------------------------------------------------
+# BotProtocol - implement this to make any custom bot work with Arena
 # ---------------------------------------------------------------------------
 
 class BotProtocol:
     """Base class for custom bots.
 
     Implement best_move() and your bot works with Arena, tournaments,
-    and any other hexbot tool. You don't have to subclass this —
+    and any other hexbot tool. You don't have to subclass this -
     any object with a best_move(game) method works.
 
     Example:
@@ -183,7 +613,7 @@ class BotProtocol:
 
 
 # ---------------------------------------------------------------------------
-# Bot — wraps network + search into one clean object
+# Bot - wraps network + search into one clean object
 # ---------------------------------------------------------------------------
 
 class Bot:
@@ -272,7 +702,7 @@ class Bot:
         # Convert HexGame to format searcher expects
         from main import HexGame as _HexGame
         if isinstance(game, HexGame):
-            # hexgame.HexGame → need to replay into main.HexGame for MCTS
+            # hexgame.HexGame -> need to replay into main.HexGame for MCTS
             py_game = _HexGame(candidate_radius=3, max_total_stones=200)
             for q, r in game.moves:
                 py_game.place_stone(q, r)
@@ -392,6 +822,32 @@ class Bot:
         bot._searcher = None
         return bot
 
+    @classmethod
+    def orca(cls, sims: int = 200) -> Bot:
+        """Load the pre-trained Orca bot (v3).
+
+        The Orca bot uses a 3.9M parameter network (128 filters, 12 residual
+        blocks) trained via AlphaZero-style self-play with MCTS.
+
+        Args:
+            sims: MCTS simulations per move (default 200).
+
+        Returns:
+            Bot loaded with Orca checkpoint.
+        """
+        import os
+        orca_path = os.path.join(os.path.dirname(__file__), 'orca', 'checkpoint.pt')
+        pretrained_path = os.path.join(os.path.dirname(__file__), 'pretrained.pt')
+        for path in [orca_path, pretrained_path]:
+            if os.path.exists(path):
+                bot = cls.load(path)
+                bot._sims = sims
+                return bot
+        raise FileNotFoundError(
+            "No Orca checkpoint found. Download pretrained.pt or train with: "
+            "python -m orca.train"
+        )
+
     def __repr__(self):
         if self._search_type in ('random', 'heuristic'):
             return f'Bot({self._search_type})'
@@ -400,7 +856,7 @@ class Bot:
 
 
 # ---------------------------------------------------------------------------
-# Arena — play bots against each other
+# Arena - play bots against each other
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -515,7 +971,7 @@ class Arena:
 
 
 # ---------------------------------------------------------------------------
-# train — simple self-play training
+# train - simple self-play training
 # ---------------------------------------------------------------------------
 
 def train(
@@ -610,7 +1066,7 @@ def train(
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    print('hexbot — Hex Connect-6 Bot Framework')
+    print('hexbot - Hex Connect-6 Bot Framework')
     print('=' * 40)
 
     # Test HexGame

@@ -54,39 +54,47 @@ class TrainingObserver(Protocol):
 # Config
 # ---------------------------------------------------------------------------
 
-BOARD_SIZE = 19
-NUM_CHANNELS = 7  # was 5: added 2 threat channels for deeper tactical awareness
-NUM_FILTERS = 128     # 128 filters — fast training, search compensates for width
-NUM_RES_BLOCKS = 12   # 12 blocks — deeper tower for complex pattern recognition
+# Import from orca/config.py if available, otherwise use defaults.
+# Edit orca/config.py to change these values for training.
+try:
+    from orca.config import (
+        BOARD_SIZE, NUM_CHANNELS, NUM_FILTERS, NUM_RES_BLOCKS,
+        C_PUCT, PLAY_STYLE, C_BLEND_ADJACENT, C_BLEND_DISTANT,
+        DISTANT_EXPLORE_PROB, DISTANT_RANGE,
+        DIRICHLET_ALPHA, DIRICHLET_EPSILON, NUM_SIMULATIONS, TEMP_THRESHOLD,
+        REPLAY_BUFFER_SIZE, BATCH_SIZE, LEARNING_RATE, L2_REG,
+        MCTS_BATCH_SIZE,
+    )
+except ImportError:
+    # Standalone fallback defaults (no orca package needed)
+    BOARD_SIZE = 19
+    NUM_CHANNELS = 7
+    NUM_FILTERS = 128
+    NUM_RES_BLOCKS = 12
+    C_PUCT = 1.5
+    PLAY_STYLE = 'distant'
+    C_BLEND_ADJACENT = 0.15
+    C_BLEND_DISTANT = 0.05
+    DISTANT_EXPLORE_PROB = 0.25
+    DISTANT_RANGE = (2, 5)
+    DIRICHLET_ALPHA = 0.3
+    DIRICHLET_EPSILON = 0.25
+    NUM_SIMULATIONS = 400
+    TEMP_THRESHOLD = 35
+    REPLAY_BUFFER_SIZE = 400_000
+    BATCH_SIZE = 1024
+    LEARNING_RATE = 0.001
+    L2_REG = 1e-4
+    MCTS_BATCH_SIZE = 64
 
-C_PUCT = 1.5
-
-# Play style: 'distant' explores spread-out colony placements,
-#              'close' keeps classic adjacent-only play.
-# Switch this before training to choose your strategy.
-PLAY_STYLE = 'distant'   # 'distant' or 'close'
-
-# --- Distant play tuning (only used when PLAY_STYLE == 'distant') ---
-C_BLEND_ADJACENT = 0.15      # C heuristic weight for adjacent moves (was 0.30)
-C_BLEND_DISTANT  = 0.05      # C heuristic weight for far moves (was 0.15)
-DISTANT_EXPLORE_PROB = 0.25   # chance to force a gap placement per move
-DISTANT_RANGE = (2, 5)        # min/max distance from nearest existing stone
-
-DIRICHLET_ALPHA = 0.3 if PLAY_STYLE == 'distant' else 0.15
-DIRICHLET_EPSILON = 0.25
-NUM_SIMULATIONS = 400
-TEMP_THRESHOLD = 35  # was 20 — explore longer into mid-game where we're weakest
-
-REPLAY_BUFFER_SIZE = 400_000  # 4x larger for diverse experience
-BATCH_SIZE = 1024
-LEARNING_RATE = 0.001
-L2_REG = 1e-4
-
-HALF = BOARD_SIZE // 2  # 9
+HALF = BOARD_SIZE // 2
 
 
 def get_device() -> torch.device:
-    if torch.backends.mps.is_available():
+    """Auto-detect best available device: CUDA > MPS > CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
 
@@ -190,7 +198,7 @@ def encode_state(game: HexGame) -> Tuple[torch.Tensor, int, int]:
 
     # Plane 5: current player's threat map (where placing creates 4+ in a row)
     # Plane 6: opponent's threat map (where opponent has 4+ in a row potential)
-    # These give the network INFORMATION about threats — it decides what to do
+    # These give the network INFORMATION about threats - it decides what to do
     if occ:
         cands = game.candidates if hasattr(game, 'candidates') else []
         for q, r in cands:
@@ -243,7 +251,7 @@ def decode_policy(
         if 0 <= i < BOARD_SIZE and 0 <= j < BOARD_SIZE:
             idx = i * BOARD_SIZE + j
             result[(q, r)] = probs[idx]
-        # Moves outside the window get no probability — that's fine
+        # Moves outside the window get no probability - that's fine
 
     # Renormalize
     s = sum(result.values())
@@ -288,7 +296,7 @@ def migrate_checkpoint_5to7(state_dict: dict) -> dict:
             new_w = torch.zeros(nf, 7, 3, 3, dtype=w.dtype, device=w.device)
             new_w[:, :5, :, :] = w
             state_dict[key] = new_w
-            print(f'  ✓ Migrated conv_init.weight: {w.shape} → {new_w.shape} (2 threat channels added)')
+            print(f'  OK: Migrated conv_init.weight: {w.shape} -> {new_w.shape} (2 threat channels added)')
     return state_dict
 
 
@@ -308,7 +316,7 @@ def migrate_checkpoint_filters(state_dict: dict, target_filters: int = NUM_FILTE
     if init_key in new_sd:
         old_filters = new_sd[init_key].shape[0]
         if old_filters < target_filters:
-            print(f'  ✓ Migrating {old_filters}→{target_filters} filters, expanding network...')
+            print(f'  OK: Migrating {old_filters}->{target_filters} filters, expanding network...')
             migrated = True
 
             # Helper: pad a tensor's filter dimensions
@@ -338,7 +346,7 @@ def migrate_checkpoint_filters(state_dict: dict, target_filters: int = NUM_FILTE
             nc = new_sd[init_key].shape[1]  # input channels (7)
             bs2 = BOARD_SIZE * BOARD_SIZE
 
-            # conv_init: (old_f, 7, 3, 3) → (nf, 7, 3, 3)
+            # conv_init: (old_f, 7, 3, 3) -> (nf, 7, 3, 3)
             new_sd[init_key] = pad_filters(new_sd[init_key], nf, nc)
             new_sd['bn_init.weight'] = pad_filters(new_sd['bn_init.weight'], nf)
             new_sd['bn_init.bias'] = pad_filters(new_sd['bn_init.bias'], nf)
@@ -364,23 +372,23 @@ def migrate_checkpoint_filters(state_dict: dict, target_filters: int = NUM_FILTE
                             new_sd[k] = pad_filters(t, nf)
                     # If key doesn't exist (new block), it'll be randomly initialized by the model
 
-            # Policy head: conv (nf→2), fc (2*bs2 → bs2)
+            # Policy head: conv (nf->2), fc (2*bs2 -> bs2)
             if 'policy_conv.weight' in new_sd:
                 new_sd['policy_conv.weight'] = pad_filters(
                     new_sd['policy_conv.weight'], 2, nf)
-            # policy_fc stays same size (2*bs2 → bs2)
+            # policy_fc stays same size (2*bs2 -> bs2)
 
-            # Value head: conv (nf→1), fc1 (bs2→256), fc2 (256→1)
+            # Value head: conv (nf->1), fc1 (bs2->256), fc2 (256->1)
             if 'value_conv.weight' in new_sd:
                 new_sd['value_conv.weight'] = pad_filters(
                     new_sd['value_conv.weight'], 1, nf)
 
-            # Threat head: conv (nf→1)
+            # Threat head: conv (nf->1)
             if 'threat_conv.weight' in new_sd:
                 new_sd['threat_conv.weight'] = pad_filters(
                     new_sd['threat_conv.weight'], 1, nf)
 
-            print(f'  ✓ Network expanded: {old_filters}→{nf} filters')
+            print(f'  OK: Network expanded: {old_filters}->{nf} filters')
 
     return new_sd
 
@@ -648,8 +656,8 @@ class MCTS:
 
         return best_move, best_child
 
-    # Progressive widening: start narrow → forces deeper search
-    INITIAL_WIDTH = 6    # only 6 children at first → deep tree
+    # Progressive widening: start narrow -> forces deeper search
+    INITIAL_WIDTH = 6    # only 6 children at first -> deep tree
     WIDEN_AT_20 = 10     # after 20 visits, expand to 10
     WIDEN_AT_50 = 16     # after 50 visits, expand to 16
     WIDEN_AT_100 = 25    # after 100 visits, expand to 25
@@ -657,7 +665,7 @@ class MCTS:
     def _expand(self, node: MCTSNode, game: HexGame) -> float:
         """Expand node using NN with progressive widening.
         Only creates top-K children initially. More are added as visits increase.
-        This forces the tree DEEPER instead of wider — key for multi-move lookahead."""
+        This forces the tree DEEPER instead of wider - key for multi-move lookahead."""
         encoded, oq, orr = encode_state(game)
         policy_logits, value = self.net.predict(encoded)
         policy = decode_policy(policy_logits, game, oq, orr)
@@ -775,7 +783,7 @@ class TrainingSample:
 
 
 # ---------------------------------------------------------------------------
-# Forced-move detection — skip NN for obvious moves (huge speedup)
+# Forced-move detection - skip NN for obvious moves (huge speedup)
 # ---------------------------------------------------------------------------
 
 AXES_3 = ((1, 0), (0, 1), (1, -1))
@@ -846,7 +854,7 @@ def _threat_search(game, depth: int = 4) -> Optional[Tuple[int, int]]:
     """Fast threat-space search to find moves creating unstoppable forks.
 
     Searches forcing lines (moves creating 3+ on multiple axes or 4+ on one axis).
-    Much cheaper than MCTS — branching factor ~3-8 instead of 30+.
+    Much cheaper than MCTS - branching factor ~3-8 instead of 30+.
 
     Returns the first move of a winning forcing sequence, or None.
     """
@@ -875,7 +883,7 @@ def _threat_search(game, depth: int = 4) -> Optional[Tuple[int, int]]:
 
     scored_moves.sort(key=lambda x: x[1], reverse=True)
 
-    # Check if we have 2 stones this turn — if so, try PAIRS of moves
+    # Check if we have 2 stones this turn - if so, try PAIRS of moves
     stt = game.stones_this_turn if hasattr(game, 'stones_this_turn') else 0
     stones_left_this_turn = (2 - stt) if hasattr(game, 'stones_per_turn') and game.stones_per_turn == 2 else 1
 
@@ -923,7 +931,7 @@ def _threat_search(game, depth: int = 4) -> Optional[Tuple[int, int]]:
             # Opponent's best responses: block our threats or make their own
             opp_responses = _get_threat_moves(game, opp, min_line=3)
             if not opp_responses:
-                # Opponent has no threats — any reasonable move
+                # Opponent has no threats - any reasonable move
                 opp_responses = _get_threat_moves(game, p, min_line=4)  # block ours
 
             forces_win = True
@@ -964,14 +972,14 @@ def find_forced_move(game) -> Optional[Tuple[int, int]]:
     """Only force the ONE truly undeniable move: completing 6-in-a-row to win.
 
     Everything else (blocking, extending, forking) is left to MCTS so it can
-    weigh strategic nuance — e.g. blocking one cell further out may be better
+    weigh strategic nuance - e.g. blocking one cell further out may be better
     than the adjacent block if it also builds your own position.
 
     Returns winning move or None.
     """
     p = game.current_player
 
-    # Get candidates — works for both CGameState and HexGame
+    # Get candidates - works for both CGameState and HexGame
     if hasattr(game, 'candidates'):
         cands = game.candidates
     else:
@@ -1030,7 +1038,7 @@ def compute_threat_bonus(game, move: Tuple[int, int], player: int) -> float:
     """Compute a training priority bonus for a move based on threat potential.
 
     Used in self-play to boost priority of samples where forks/threats are created.
-    NOT used to force moves — just to make the training signal richer.
+    NOT used to force moves - just to make the training signal richer.
 
     Returns bonus value (0.0 = normal, up to 5.0 for unstoppable forks).
     """
@@ -1066,13 +1074,13 @@ def compute_threat_label(game: HexGame) -> np.ndarray:
     """Compute threat features including preemptives (2-in-a-row).
 
     Returns 4 floats encoding the full threat landscape:
-    [0] my threat level — continuous 0-1:
+    [0] my threat level - continuous 0-1:
         2-in-a-row = 0.15 (preemptive)
         3-in-a-row = 0.35 (strong preemptive)
         4-in-a-row = 0.60 (active threat)
         5-in-a-row = 0.85 (imminent win)
         6-in-a-row = 1.00 (won)
-    [1] my multi-axis score — how many axes have 2+ in a row:
+    [1] my multi-axis score - how many axes have 2+ in a row:
         1 axis = 0.25, 2 axes = 0.60 (proto-fork), 3 axes = 1.0 (dominant)
     [2] opp threat level (same scale)
     [3] opp multi-axis score (same scale)
@@ -1137,7 +1145,7 @@ def compute_threat_label(game: HexGame) -> np.ndarray:
     opp_max, opp_axes2, opp_axes3 = analyze_stones(opp_stones, my_stones)
 
     # Continuous threat level: preemptives start at 2-in-a-row
-    # 4 and 5 are nearly identical — both can finish with 1 stone
+    # 4 and 5 are nearly identical - both can finish with 1 stone
     def threat_level(max_line):
         if max_line <= 1: return 0.0
         if max_line == 2: return 0.15   # preemptive
@@ -1164,7 +1172,7 @@ def compute_threat_label(game: HexGame) -> np.ndarray:
 
 
 class ReplayBuffer:
-    """Prioritized replay buffer — samples proportional to priority."""
+    """Prioritized replay buffer - samples proportional to priority."""
 
     def __init__(self, capacity: int = REPLAY_BUFFER_SIZE):
         self.buffer: collections.deque = collections.deque(maxlen=capacity)
@@ -1194,7 +1202,7 @@ class ReplayBuffer:
 
 
 # ---------------------------------------------------------------------------
-# Position catalog — predefined starting formations
+# Position catalog - predefined starting formations
 # ---------------------------------------------------------------------------
 
 POSITION_CATALOG = {
@@ -1250,7 +1258,7 @@ POSITION_CATALOG = {
 
 
 # ---------------------------------------------------------------------------
-# Guided positions — theory-based curriculum for faster learning
+# Guided positions - theory-based curriculum for faster learning
 # Level 1: Endgame (trivial wins/blocks)
 # Level 2: Formation (mid-game patterns)
 # Level 3: Known sequences (with hint moves)
@@ -1471,7 +1479,7 @@ def setup_position(position: Dict[Tuple[int, int], int]) -> HexGame:
 
 
 # ---------------------------------------------------------------------------
-# Puzzle generator — tactical positions with forced wins/blocks
+# Puzzle generator - tactical positions with forced wins/blocks
 # ---------------------------------------------------------------------------
 
 def generate_puzzles(num_puzzles: int = 50, rng: Optional[random.Random] = None) -> List[dict]:
@@ -1553,7 +1561,7 @@ def generate_puzzles(num_puzzles: int = 50, rng: Optional[random.Random] = None)
 
 
 # ---------------------------------------------------------------------------
-# Human game importer — learn from real games on hexo.did.science
+# Human game importer - learn from real games on hexo.did.science
 # ---------------------------------------------------------------------------
 
 def load_human_games(path: str = "human_games.jsonl",
@@ -1615,7 +1623,7 @@ def load_human_games(path: str = "human_games.jsonl",
 
                 # Verify turn matches
                 if game.current_player != player:
-                    # Coordinate mismatch or turn issue — skip game
+                    # Coordinate mismatch or turn issue - skip game
                     valid = False
                     break
 
@@ -1632,7 +1640,7 @@ def load_human_games(path: str = "human_games.jsonl",
                 if 0 <= i < BOARD_SIZE and 0 <= j < BOARD_SIZE:
                     policy[i * BOARD_SIZE + j] = 1.0
                 else:
-                    # Move outside encoding window — skip this sample but continue
+                    # Move outside encoding window - skip this sample but continue
                     try:
                         game.place_stone(q, r)
                     except Exception:
@@ -1774,18 +1782,18 @@ def load_online_games(path: str = "online_games.jsonl",
 
 
 # ---------------------------------------------------------------------------
-# Symmetry augmentation — valid hex-on-grid transforms
+# Symmetry augmentation - valid hex-on-grid transforms
 # ---------------------------------------------------------------------------
 # The board is encoded as a 19x19 rectangular grid where (i,j) = axial (q,r).
 # Valid augmentations must be in BOTH the square grid symmetry group (D4, order 8)
 # AND the hex symmetry group (D6, order 12).
 #
 # Intersection = 3 non-identity transforms:
-#   1. (q,r) → (-q,-r)   grid: (i,j) → (N-1-i, N-1-j)   180° rotation
-#   2. (q,r) → (r,q)     grid: (i,j) → (j,i)             transpose
-#   3. (q,r) → (-r,-q)   grid: (i,j) → (N-1-j, N-1-i)   transpose + 180°
+#   1. (q,r) -> (-q,-r)   grid: (i,j) -> (N-1-i, N-1-j)   180° rotation
+#   2. (q,r) -> (r,q)     grid: (i,j) -> (j,i)             transpose
+#   3. (q,r) -> (-r,-q)   grid: (i,j) -> (N-1-j, N-1-i)   transpose + 180°
 #
-# Other hex reflections like (q,r)→(q,-q-r) map grid positions OUTSIDE the
+# Other hex reflections like (q,r)->(q,-q-r) map grid positions OUTSIDE the
 # NxN grid (N-1-i-j < 0 when i+j > N-1), producing broken boards with
 # missing stones. Credit: Flopster for catching this.
 
@@ -1797,13 +1805,13 @@ def augment_sample(sample: TrainingSample) -> List[TrainingSample]:
     aug = []
 
     transforms = [
-        # 180° rotation: (i,j) → (N-1-i, N-1-j)
+        # 180° rotation: (i,j) -> (N-1-i, N-1-j)
         (lambda s: s[:, ::-1, ::-1].copy(),
          lambda p: p[::-1, ::-1].copy()),
-        # Transpose: (i,j) → (j,i)
+        # Transpose: (i,j) -> (j,i)
         (lambda s: s.transpose(0, 2, 1).copy(),
          lambda p: p.T.copy()),
-        # Transpose + 180°: (i,j) → (N-1-j, N-1-i)
+        # Transpose + 180°: (i,j) -> (N-1-j, N-1-i)
         (lambda s: s[:, ::-1, ::-1].transpose(0, 2, 1).copy(),
          lambda p: p[::-1, ::-1].T.copy()),
     ]
@@ -1847,7 +1855,7 @@ def self_play_game(
         temperature = 1.0 if move_count < temp_threshold else 0.01
         add_noise = move_count < temp_threshold
 
-        # Fast forced-move detection — skip NN for obvious wins/blocks
+        # Fast forced-move detection - skip NN for obvious wins/blocks
         forced = find_forced_move(game)
         if forced:
             policy = {forced: 1.0}
@@ -1912,7 +1920,7 @@ def self_play_game(
 
 
 # ---------------------------------------------------------------------------
-# C Engine Integration — CGameState (50x faster game simulation)
+# C Engine Integration - CGameState (50x faster game simulation)
 # ---------------------------------------------------------------------------
 
 import ctypes
@@ -2170,7 +2178,7 @@ class SEResBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(num_filters)
         self.conv2 = nn.Conv2d(num_filters, num_filters, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(num_filters)
-        # SE: global avg pool → FC → ReLU → FC → sigmoid
+        # SE: global avg pool -> FC -> ReLU -> FC -> sigmoid
         mid = max(num_filters // se_ratio, 16)
         self.se_fc1 = nn.Linear(num_filters, mid)
         self.se_fc2 = nn.Linear(mid, num_filters)
@@ -2191,7 +2199,7 @@ class HybridHexNet(nn.Module):
     """CNN + Global Attention network for hex connect-6.
 
     Architecture:
-      1. Stem: Conv2d → BN → ReLU
+      1. Stem: Conv2d -> BN -> ReLU
       2. Body: N × SE-ResBlock (local patterns + channel attention)
       3. Global Attention: 2 × MultiheadAttention (long-range dependencies)
       4. Heads: policy (361), value (1), threat (4)
@@ -2256,7 +2264,7 @@ class HybridHexNet(nn.Module):
         x = F.relu(self.bn_init(self.conv_init(x)))
         x = self.res_blocks(x)
 
-        # Global attention: (B, C, H, W) → (B, H*W, C)
+        # Global attention: (B, C, H, W) -> (B, H*W, C)
         x_flat = x.view(B, -1, bs2).permute(0, 2, 1)  # (B, bs2, C)
         x_flat = x_flat + self.pos_embedding
 
@@ -2266,7 +2274,7 @@ class HybridHexNet(nn.Module):
             attn_out, _ = attn(x_flat, x_flat, x_flat)
             x_flat = residual + attn_out
 
-        # Back to spatial: (B, bs2, C) → (B, C, H, W)
+        # Back to spatial: (B, bs2, C) -> (B, C, H, W)
         x = x_flat.permute(0, 2, 1).view(B, -1, bs, bs)
 
         # Policy head
@@ -2315,6 +2323,9 @@ def create_network(config: str = 'standard', board_size: int = BOARD_SIZE) -> nn
     elif config == 'hybrid-small':
         return HybridHexNet(board_size=board_size, num_filters=128, num_res_blocks=6,
                             num_attention_heads=4, num_attention_layers=1)
+    elif config == 'orca-transformer':
+        from orca.transformer_net import TransformerHexNet
+        return TransformerHexNet(board_size=board_size)
     else:
         raise ValueError(f"Unknown network config: {config}")
 
@@ -2326,7 +2337,7 @@ def create_network(config: str = 'standard', board_size: int = BOARD_SIZE) -> nn
 class NNAlphaBeta:
     """Alpha-beta search with NN evaluation at leaves.
     Uses C engine for fast move ordering + pruning, NN for position evaluation.
-    Reaches depth 8-12 (vs MCTS depth 3-5) — sees 4-6 full turns ahead.
+    Reaches depth 8-12 (vs MCTS depth 3-5) - sees 4-6 full turns ahead.
     """
 
     def __init__(self, net, depth: int = 12, nn_depth: int = 5):
@@ -2395,7 +2406,7 @@ class NNAlphaBeta:
         self._lib.board_reset(self._board_ptr)
 
         if hasattr(game, '_history') and game._history:
-            # HexGame — extract (q, r) from undo records
+            # HexGame - extract (q, r) from undo records
             for rec in game._history:
                 q, r = rec[0], rec[1]
                 self._lib.board_place(self._board_ptr, q, r)
@@ -2585,7 +2596,7 @@ class BatchedNNAlphaBeta:
             enc_arr = np.ctypeslib.as_array(enc_ptr, shape=(n_leaves * 5 * BOARD_SIZE * BOARD_SIZE,))
             enc_arr = enc_arr.reshape(n_leaves, 5, BOARD_SIZE, BOARD_SIZE)
 
-            # Pad 5→NUM_CHANNELS (7) channels
+            # Pad 5->NUM_CHANNELS (7) channels
             batch = np.zeros((n_leaves, NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
             batch[:, :5] = enc_arr
 
@@ -2602,7 +2613,7 @@ class BatchedNNAlphaBeta:
             vals[p1_mask] = -vals[p1_mask]
             vals = np.clip(vals, -0.99, 0.99).astype(np.float32)
 
-            # Read hashes (must copy — C buffer may be reused)
+            # Read hashes (must copy - C buffer may be reused)
             hashes = np.ctypeslib.as_array(hash_ptr, shape=(n_leaves,)).copy()
 
             # Bulk inject into C cache
@@ -2801,7 +2812,7 @@ class BatchedMCTS:
                 game._lib.c_ab_solve(game._ptr, 4,
                                       ctypes.byref(ab_val), ctypes.byref(ab_ste))
                 if abs(ab_val.value) >= 1.0:
-                    # Proven win/loss — skip MCTS entirely
+                    # Proven win/loss - skip MCTS entirely
                     moves = game.legal_moves()
                     if moves:
                         # Return best move from scored moves
@@ -2948,7 +2959,7 @@ class BatchedMCTS:
                 continue
 
             if node.is_expanded:
-                # Already expanded (rare collision) — just backup
+                # Already expanded (rare collision) - just backup
                 for _ in range(depth):
                     game.undo()
                 continue
@@ -3151,7 +3162,7 @@ def self_play_game_v2(
         temperature = 1.0 if move_count < temp_threshold else 0.01
         add_noise = move_count < temp_threshold
 
-        # Let MCTS decide everything — no forced moves during training.
+        # Let MCTS decide everything - no forced moves during training.
         policy = mcts.search(game, temperature=temperature, add_noise=add_noise)
         if not policy:
             break
@@ -3257,7 +3268,7 @@ def self_play_game_v2(
         elif i >= n - 15:
             sample.priority = 2.0
 
-    # Penalize short games — they don't teach mid/late-game skills
+    # Penalize short games - they don't teach mid/late-game skills
     if n < 30:
         for sample in samples:
             sample.priority *= 0.5

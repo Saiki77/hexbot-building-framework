@@ -1,5 +1,5 @@
 """
-Pure Python Hex Connect-6 engine — used internally by the training pipeline.
+Pure Python Hex Connect-6 engine - used internally by the training pipeline.
 
 For the public API, use hexgame.py instead (C-backed, faster, cleaner interface).
 
@@ -46,7 +46,7 @@ _zobrist_getrandbits = _zobrist_rng.getrandbits
 
 
 # ---------------------------------------------------------------------------
-# HexGame — the main engine
+# HexGame - the main engine
 # ---------------------------------------------------------------------------
 
 class HexGame:
@@ -97,7 +97,7 @@ class HexGame:
         if cand_was_present:
             cands.discard(cell)
 
-        # expand candidates — track additions for undo
+        # expand candidates - track additions for undo
         cands_added = []
         cands_add = cands.add
         cands_added_append = cands_added.append
@@ -107,7 +107,7 @@ class HexGame:
                 cands_add(nb)
                 cands_added_append(nb)
 
-        # win check — fully inlined, no function calls
+        # win check - fully inlined, no function calls
         win = False
         # axis (1, 0)
         count = 1
@@ -157,7 +157,7 @@ class HexGame:
                 if count >= 6:
                     win = True
 
-        # zobrist — inlined lookup
+        # zobrist - inlined lookup
         zc = _zobrist_cache_0 if player == 0 else _zobrist_cache_1
         zv = zc.get(cell)
         if zv is None:
@@ -252,7 +252,7 @@ class HexGame:
         """Pick a random legal move. Pass rng.choice (bound method) for speed."""
         if not self.occupied:
             return (0, 0)
-        # Convert to tuple for O(1) random access — cheaper than list()
+        # Convert to tuple for O(1) random access - cheaper than list()
         # when candidates is small, similar when large
         return rng_choice(tuple(self.candidates))
 
