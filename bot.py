@@ -69,8 +69,8 @@ PLAY_STYLE = 'distant'   # 'distant' or 'close'
 # --- Distant play tuning (only used when PLAY_STYLE == 'distant') ---
 C_BLEND_ADJACENT = 0.15      # C heuristic weight for adjacent moves (was 0.30)
 C_BLEND_DISTANT  = 0.05      # C heuristic weight for far moves (was 0.15)
-DISTANT_EXPLORE_PROB = 0.25   # chance to force a far-away placement per move
-DISTANT_RANGE = (5, 9)        # how far from centroid (in hexes) to place
+DISTANT_EXPLORE_PROB = 0.25   # chance to force a gap placement per move
+DISTANT_RANGE = (2, 5)        # min/max distance from nearest existing stone
 
 DIRICHLET_ALPHA = 0.3 if PLAY_STYLE == 'distant' else 0.15
 DIRICHLET_EPSILON = 0.25
@@ -3147,25 +3147,26 @@ def self_play_game_v2(
         if not policy:
             break
 
-        # --- DISTANT EXPLORATION: place stones far from existing cluster ---
+        # --- DISTANT EXPLORATION: place stones 2-5 hexes from nearest stone ---
         if PLAY_STYLE == 'distant' and move_count < 15 and random.random() < DISTANT_EXPLORE_PROB:
             existing = _get_existing_stones(game)
             if existing:
-                cx = sum(s[0] for s in existing) / len(existing)
-                cy = sum(s[1] for s in existing) / len(existing)
-                far_candidates = []
-                lo, hi = DISTANT_RANGE
-                for angle_i in range(12):
-                    angle = angle_i * (math.pi / 6)
-                    for dist in range(lo, hi):
-                        q = int(round(cx + dist * math.cos(angle)))
-                        r = int(round(cy + dist * math.sin(angle)))
-                        if (q, r) not in existing:
-                            far_candidates.append((q, r))
-                if far_candidates:
-                    forced = random.choice(far_candidates)
+                lo, hi = DISTANT_RANGE  # min/max distance from nearest stone
+                gap_candidates = set()
+                for sq, sr in existing:
+                    for dq in range(-hi, hi + 1):
+                        for dr in range(-hi, hi + 1):
+                            d = abs(dq) + abs(dr)
+                            if d < lo or d > hi:
+                                continue
+                            cq, cr = sq + dq, sr + dr
+                            if (cq, cr) not in existing:
+                                gap_candidates.add((cq, cr))
+                if gap_candidates:
+                    forced = random.choice(list(gap_candidates))
                     policy = {forced: 1.0}
-                    print(f'  │  ⚡ DISTANT: mv{move_count} → ({forced[0]},{forced[1]}) dist from centroid ({cx:.0f},{cy:.0f})')
+                    nearest = min(abs(forced[0]-s[0]) + abs(forced[1]-s[1]) for s in existing)
+                    print(f'  │  ⚡ DISTANT: mv{move_count} → ({forced[0]},{forced[1]}) nearest_stone={nearest}')
 
         # --- RESIGN THRESHOLD: stop hopeless games early ---
         # Disabled: causes false "draws" on an infinite board where draws don't exist
