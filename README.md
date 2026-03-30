@@ -985,19 +985,23 @@ Run `python benchmark.py` to measure performance on your hardware.
 ## Architecture
 
 ```
-hexbot.py       High-level framework (Bot, Arena, train, analysis functions)
+hexbot.py            High-level framework (Bot, Arena, train, analysis functions)
     |
-    ├── hexgame.py    Game engine API (HexGame wrapping C engine)
+    ├── hexgame.py         Game engine API (HexGame wrapping C engine)
     │       |
-    │   engine.so     Compiled C library (auto-built from engine.c)
+    │   engine.so          Compiled C library (auto-built from engine.c)
     │       |
-    │   engine.c      2,331 lines of optimized C
+    │   engine.c           2,331 lines of optimized C
     │
-    ├── bot.py        Neural network + MCTS + training (optional, needs PyTorch)
+    ├── bot.py             Neural network + MCTS + training (optional, needs PyTorch)
     │       |
-    │   main.py       Pure Python game engine (used by bot.py for training)
+    │   main.py            Pure Python game engine (used by bot.py for training)
     │
-    └── examples/     Example bots demonstrating different approaches
+    ├── dashboard.py       Live training dashboard (REST + WebSocket API)
+    │
+    ├── test_dashboard.py  Test the dashboard with fake data (no training needed)
+    │
+    └── examples/          Example bots demonstrating different approaches
 ```
 
 
@@ -1094,11 +1098,11 @@ The `BatchedMCTS` class uses virtual loss to select multiple leaves simultaneous
 from bot import BatchedMCTS, create_network
 
 net = create_network('standard')
-mcts = BatchedMCTS(net, num_simulations=200, batch_size=8)
+mcts = BatchedMCTS(net, num_simulations=200, batch_size=64)
 policy = mcts.search(game, temperature=1.0, add_noise=True)
 ```
 
-Virtual loss temporarily increments a node's visit count before evaluation, ensuring that parallel leaf selections explore different branches. After the batch evaluation completes, the virtual losses are corrected. This reduces the number of NN forward passes by the batch size factor (8x fewer calls with batch_size=8).
+Virtual loss temporarily increments a node's visit count before evaluation, ensuring that parallel leaf selections explore different branches. After the batch evaluation completes, the virtual losses are corrected. This reduces the number of NN forward passes by the batch size factor (64x fewer calls with batch_size=64).
 
 ### AB Hybrid in MCTS
 
@@ -1178,35 +1182,42 @@ for sample in buffer_samples:
 
 With the buffer pre-loaded, training starts producing meaningful gradient updates from iteration 1 instead of waiting 5-10 iterations to fill the buffer from scratch.
 
-## Training Configuration: Spread-Out Play
+## Training Configuration
 
-By default, the training pipeline encourages the bot to explore distant stone placements (colonies, gap formations). This is controlled by several settings in `bot.py` that you can toggle:
+### Play Style
 
-### Enable/Disable Colony Exploration
-
-In `bot.py`, the `self_play_game_v2()` function has a distant exploration mechanism that forces 20% of early moves to non-adjacent cells. To disable it (for pure MCTS-driven play), comment out or remove the `DISTANT EXPLORATION` block around line 3090.
-
-### Tuning Exploration Parameters
+Set `PLAY_STYLE` in `bot.py` to choose your training strategy:
 
 ```python
-# bot.py constants - adjust these to control exploration vs exploitation
-
-DIRICHLET_ALPHA = 0.3    # Higher = more random exploration (default 0.3)
-                          # Lower (0.03-0.1) = trust the network's policy more
-                          # Set to 0.03 for focused play, 0.3 for diverse exploration
-
-TEMP_THRESHOLD = 35       # Moves before switching to greedy play (default 35)
-                          # Lower = greedy earlier (more exploitation)
-                          # Higher = explore longer into mid-game
+PLAY_STYLE = 'distant'   # spread-out colony exploration (default)
+PLAY_STYLE = 'close'     # classic adjacent-only play
 ```
 
-### Diversity Bonus
+When `'distant'` is active, four mechanisms encourage spread-out play:
 
-Games where stones spread across 8+ hexes get 1.5x training priority. This teaches the network that spread-out play has value. To disable this, remove the "Diversity bonus" block near the end of `self_play_game_v2()`.
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `DIRICHLET_ALPHA` | 0.3 | Exploration noise (0.03 = focused, 0.3 = diverse) |
+| `DISTANT_EXPLORE_PROB` | 0.25 | Chance per move to force a gap placement |
+| `DISTANT_RANGE` | (2, 5) | Min/max distance from nearest stone for forced moves |
+| `C_BLEND_ADJACENT` | 0.15 | C heuristic weight for adjacent moves |
+| `C_BLEND_DISTANT` | 0.05 | C heuristic weight for distant moves |
+| `TEMP_THRESHOLD` | 35 | Moves before switching to greedy play |
 
-### C Heuristic Blend
+All constants are at the top of `bot.py`. Set `PLAY_STYLE = 'close'` to disable all distant play mechanisms.
 
-The MCTS rollout blend uses 30% C heuristic weight for adjacent moves but only 15% for distant moves. This lets the neural network's opinion dominate for non-obvious placements while still using the fast C heuristic for tactical line-extension moves. Adjust the blend ratios in `BatchedMCTS.search()` around line 2815.
+### Training Throughput
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `BATCH_SIZE` | 512 | Training batch size (larger = faster steps) |
+| `BatchedMCTS batch_size` | 64 | Positions per NN forward pass in MCTS |
+| Workers per iteration | 5 | Parallel self-play processes |
+| Games per future | 2 | Games per worker batch (balances streaming vs overhead) |
+
+### Threat Evaluation
+
+The threat system only counts lines that can still extend to 6. A 4-in-a-row blocked on both ends by opponent stones is not counted as a threat — the evaluator checks that `consecutive + open_forward + open_backward >= 6` before scoring.
 
 ## Contributing
 
