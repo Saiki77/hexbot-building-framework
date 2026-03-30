@@ -3165,6 +3165,7 @@ def self_play_game_v2(
                 if far_candidates:
                     forced = random.choice(far_candidates)
                     policy = {forced: 1.0}
+                    print(f'  │  ⚡ DISTANT: mv{move_count} → ({forced[0]},{forced[1]}) dist from centroid ({cx:.0f},{cy:.0f})')
 
         # --- RESIGN THRESHOLD: stop hopeless games early ---
         # Disabled: causes false "draws" on an infinite board where draws don't exist
