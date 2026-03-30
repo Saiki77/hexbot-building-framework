@@ -152,13 +152,20 @@ def _self_play_worker(onnx_path: str, num_sims: int,
     return results
 
 
+# Shared queue for live move streaming from worker processes
+_live_move_queue: Optional[multiprocessing.Queue] = None
+
+
 def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
                           games: int, positions: Optional[list] = None,
-                          use_alphabeta: bool = True, ab_depth: int = 8) -> list:
+                          use_alphabeta: bool = True, ab_depth: int = 8,
+                          move_queue=None, is_live_worker: bool = False) -> list:
     """V2 worker: CGameState + NNAlphaBeta or BatchedMCTS.
     use_alphabeta=True: NN-guided alpha-beta search (depth 8, sees 4 turns ahead)
     use_alphabeta=False: BatchedMCTS (fallback)
-    positions: list of (position_dict, hint_moves) tuples."""
+    positions: list of (position_dict, hint_moves) tuples.
+    move_queue: if provided, stream each move to this queue for live display.
+    is_live_worker: if True, this worker streams moves to the dashboard."""
     try:
         from bot import (CGameState, BatchedMCTS, BatchedNNAlphaBeta,
                          self_play_game_v2, create_network,
@@ -195,8 +202,21 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
                 pos, hints = entry
             elif isinstance(entry, dict):
                 pos = entry
-        samples, move_history = self_play_game_v2(net, searcher, start_position=pos,
-                                                   hint_moves=hints)
+
+        # Stream moves live if this is the designated live worker
+        if is_live_worker and move_queue is not None:
+            move_queue.put(('game_start', i, games))
+
+        samples, move_history = self_play_game_v2(
+            net, searcher, start_position=pos, hint_moves=hints,
+            move_callback=(lambda mv, pl: move_queue.put(('move', list(mv), pl)))
+                if (is_live_worker and move_queue is not None) else None,
+        )
+
+        if is_live_worker and move_queue is not None:
+            result_val = samples[0].result if samples else 0.0
+            move_queue.put(('game_end', result_val, len(move_history)))
+
         t_game = _time.perf_counter() - t_game
         winner = 'P0' if (samples and samples[0].result > 0) else 'P1'
         print(f'  │  [W{pid}] game {i+1}/{games}: {winner} {len(move_history)}mv {t_game:.1f}s ({t_game/max(len(move_history),1):.2f}s/mv)')
@@ -527,7 +547,6 @@ class DashboardObserver:
         self.metrics = metrics
         self.sio = sio
         self._stop_flag = threading.Event()
-        self.live_broadcaster: Optional['LiveGameBroadcaster'] = None
 
     def on_iteration_start(self, iteration: int, total: int) -> None:
         self.metrics.current_iteration = iteration + 1
@@ -543,9 +562,6 @@ class DashboardObserver:
             'result': result,
             'num_moves': len(move_history),
         })
-        # Feed completed game to live replay
-        if self.live_broadcaster:
-            self.live_broadcaster.enqueue_game(move_history, result)
 
     def on_iteration_complete(self, metrics: dict) -> None:
         self.metrics.add_iteration(metrics)
@@ -873,15 +889,24 @@ class TrainingManager:
                 print(f'  │  Self-play: V2 (C engine + MCTS {current_sims} sims'
                       f'{f", {n_asymmetric} asymmetric" if n_asymmetric else ""})...')
 
+                # Get live move queue from broadcaster for first worker
+                live_q = None
+                if hasattr(self, '_live_broadcaster') and self._live_broadcaster:
+                    live_q = self._live_broadcaster.move_queue
+
                 with ProcessPoolExecutor(max_workers=num_workers) as pool:
                     futures = []
                     for wi, (c, pos) in enumerate(zip(chunks, chunk_positions)):
                         if c <= 0:
                             continue
+                        # First worker streams moves live to dashboard
+                        is_live = (wi == 0 and live_q is not None)
                         futures.append(
                             pool.submit(_self_play_worker_v2, net_state,
                                         self._net_config, current_sims, c, pos,
-                                        use_alphabeta=False)
+                                        use_alphabeta=False,
+                                        move_queue=live_q if is_live else None,
+                                        is_live_worker=is_live)
                         )
                     for future in as_completed(futures):
                         if self.observer.should_stop():
@@ -1238,15 +1263,15 @@ class BackgroundScraper:
 # ---------------------------------------------------------------------------
 
 class LiveGameBroadcaster:
-    """Replays completed training games move-by-move in the dashboard."""
+    """Streams live training game moves from a worker process to the dashboard."""
 
     def __init__(self, sio: SocketIO, tm: TrainingManager):
         self.sio = sio
         self.tm = tm
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._game_queue: list = []  # [(move_history, result), ...]
-        self._lock = threading.Lock()
+        self._manager = multiprocessing.Manager()
+        self.move_queue = self._manager.Queue()
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -1258,57 +1283,50 @@ class LiveGameBroadcaster:
     def stop(self):
         self._stop.set()
 
-    def enqueue_game(self, move_history: list, result: float):
-        """Called when a training game finishes — add it to the replay queue."""
-        with self._lock:
-            # Keep at most 5 pending games
-            if len(self._game_queue) < 5:
-                self._game_queue.append((move_history, result))
-
     def _loop(self):
+        """Read live moves from worker process queue and broadcast to dashboard."""
+        game = None
+        move_num = 0
         while not self._stop.is_set():
-            game_data = None
-            with self._lock:
-                if self._game_queue:
-                    game_data = self._game_queue.pop(0)
-            if game_data:
-                self._replay_game(game_data[0], game_data[1])
-            else:
-                time.sleep(0.3)
+            try:
+                msg = self.move_queue.get(timeout=0.5)
+            except Exception:
+                continue
 
-    def _replay_game(self, move_history: list, result: float):
-        """Replay a training game move-by-move on screen."""
-        game = HexGame(candidate_radius=3, max_total_stones=200)
-        self.sio.emit('live_game_start', {})
+            if msg[0] == 'game_start':
+                game_idx, total_games = msg[1], msg[2]
+                game = HexGame(candidate_radius=3, max_total_stones=200)
+                move_num = 0
+                self.sio.emit('live_game_start', {})
 
-        winner_label = 'P0' if result > 0 else ('P1' if result < 0 else 'draw')
-        for move_num, move in enumerate(move_history):
-            if self._stop.is_set():
-                break
-            q, r = move if isinstance(move, (list, tuple)) else (move[0], move[1])
-            player = game.current_player
-            game.place_stone(q, r)
+            elif msg[0] == 'move' and game is not None:
+                q, r = msg[1]
+                player = msg[2]
+                game.place_stone(q, r)
+                move_num += 1
+                self.sio.emit('live_game_move', {
+                    'move': [q, r],
+                    'player': player,
+                    'move_num': move_num,
+                    'stones_0': [list(s) for s in game.stones_0],
+                    'stones_1': [list(s) for s in game.stones_1],
+                    'candidates': [list(c) for c in list(game.candidates)[:80]],
+                    'value': 0,
+                    'current_player': player,
+                    'top_moves_current': [],
+                    'top_moves_opponent': [],
+                })
 
-            self.sio.emit('live_game_move', {
-                'move': [q, r],
-                'player': player,
-                'move_num': move_num + 1,
-                'stones_0': [list(s) for s in game.stones_0],
-                'stones_1': [list(s) for s in game.stones_1],
-                'candidates': [list(c) for c in list(game.candidates)[:80]],
-                'value': round(result, 3),
-                'current_player': player,
-                'top_moves_current': [],
-                'top_moves_opponent': [],
-            })
-            # Fast replay: 150ms per move (whole game replays in ~2-3s)
-            time.sleep(0.15)
-
-        self.sio.emit('live_game_end', {
-            'winner': game.winner,
-            'total_moves': len(move_history),
-        })
-        time.sleep(1.0)  # pause between games
+            elif msg[0] == 'game_end':
+                result_val, total_moves = msg[1], msg[2]
+                winner = None
+                if game is not None:
+                    winner = game.winner
+                self.sio.emit('live_game_end', {
+                    'winner': winner,
+                    'total_moves': total_moves,
+                })
+                game = None
 
 
 # ---------------------------------------------------------------------------
@@ -1324,7 +1342,7 @@ metrics_store = MetricsStore()
 observer = DashboardObserver(metrics_store, socketio)
 training_mgr = TrainingManager(metrics_store, observer, socketio, resource_monitor)
 live_broadcaster = LiveGameBroadcaster(socketio, training_mgr)
-observer.live_broadcaster = live_broadcaster  # wire up game replay feed
+training_mgr._live_broadcaster = live_broadcaster  # wire up live move streaming
 
 # Start gentle background scraper
 bg_scraper = BackgroundScraper(os.path.join(os.path.dirname(__file__), 'human_games.jsonl'))
@@ -1989,7 +2007,7 @@ function drawHex(){
   const all=[...stones0,...stones1,...candidates];
   if(!all.length){
     ctx.fillStyle='#aaa'; ctx.font='12px Courier New'; ctx.textAlign='center';
-    ctx.fillText('No game in progress',W/2,H/2);
+    ctx.fillText('Waiting for training game...',W/2,H/2);
     return;
   }
 

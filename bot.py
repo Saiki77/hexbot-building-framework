@@ -3104,6 +3104,7 @@ def self_play_game_v2(
     start_position: Optional[Dict[Tuple[int, int], int]] = None,
     hint_moves: Optional[List[Tuple[int, int]]] = None,
     use_c_engine: bool = True,
+    move_callback=None,
 ) -> Tuple[List[TrainingSample], List[Tuple[int, int]]]:
     """Fast self-play using C engine + batched MCTS."""
     if use_c_engine:
@@ -3209,6 +3210,13 @@ def self_play_game_v2(
         prev_player = game.current_player
         game.place_stone(*chosen)
         move_count += 1
+
+        # Stream move to live display if callback provided
+        if move_callback is not None:
+            try:
+                move_callback(chosen, prev_player)
+            except Exception:
+                pass
 
         # Fork detection: boost priority if this move created 2+ winning threats
         if samples:
