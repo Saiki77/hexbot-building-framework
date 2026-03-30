@@ -28,7 +28,10 @@ __pycache__/
 .claude/
 
 # Internal tools (not part of framework)
-dashboard.py
+benchmark*.py
+dashboard_old.py
+dashboard_clean.py
+train_dashboard.py
 browser_player.py
 online_player.py
 scrape_games.py
