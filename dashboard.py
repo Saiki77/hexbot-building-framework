@@ -871,8 +871,8 @@ class TrainingManager:
 
                 with ProcessPoolExecutor(max_workers=num_workers) as pool:
                     futures = []
-                    # Batch 4 games per future: balances startup overhead vs streaming
-                    GAMES_PER_FUTURE = 4
+                    # 2 games per future: first results after ~1 min, good streaming
+                    GAMES_PER_FUTURE = 2
                     flat_positions = []
                     for c, pos in zip(chunks, chunk_positions):
                         for gi in range(c):
