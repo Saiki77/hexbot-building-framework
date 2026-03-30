@@ -60,7 +60,13 @@ NUM_FILTERS = 128     # 128 filters — fast training, search compensates for wi
 NUM_RES_BLOCKS = 12   # 12 blocks — deeper tower for complex pattern recognition
 
 C_PUCT = 1.5
-DIRICHLET_ALPHA = 0.3    # high noise for exploring distant/non-obvious moves
+
+# Play style: 'distant' explores spread-out colony placements,
+#              'close' keeps classic adjacent-only play.
+# Switch this before training to choose your strategy.
+PLAY_STYLE = 'distant'   # 'distant' or 'close'
+
+DIRICHLET_ALPHA = 0.3 if PLAY_STYLE == 'distant' else 0.15
 DIRICHLET_EPSILON = 0.25
 NUM_SIMULATIONS = 400
 TEMP_THRESHOLD = 35  # was 20 — explore longer into mid-game where we're weakest
@@ -2811,19 +2817,25 @@ class BatchedMCTS:
                         c_priors = {}
                         for i in range(n_scored):
                             c_priors[(q_arr[i], r_arr[i])] = exp_scores[i] / total
-                        # Blend NN + C heuristic (less C for distant moves)
-                        existing = set()
-                        if hasattr(game, 'stones_0'):
-                            existing = game.stones_0 | game.stones_1
-                        elif hasattr(game, 'board'):
-                            existing = set(game.board.keys())
-                        for move in policy:
-                            c_prob = c_priors.get(move, 0.01)
-                            # Distant moves: trust NN more (15% C blend vs 30%)
-                            adj = any(abs(move[0]-s[0]) + abs(move[1]-s[1]) <= 1
-                                      for s in existing) if existing else True
-                            blend = 0.3 if adj else 0.15
-                            policy[move] = (1 - blend) * policy[move] + blend * c_prob
+                        # Blend NN + C heuristic
+                        if PLAY_STYLE == 'distant':
+                            # Less C influence on distant moves so NN can explore
+                            existing = set()
+                            if hasattr(game, 'stones_0'):
+                                existing = game.stones_0 | game.stones_1
+                            elif hasattr(game, 'board'):
+                                existing = set(game.board.keys())
+                            for move in policy:
+                                c_prob = c_priors.get(move, 0.01)
+                                adj = any(abs(move[0]-s[0]) + abs(move[1]-s[1]) <= 1
+                                          for s in existing) if existing else True
+                                blend = 0.3 if adj else 0.15
+                                policy[move] = (1 - blend) * policy[move] + blend * c_prob
+                        else:
+                            # Classic: uniform 30% C blend for all moves
+                            for move in policy:
+                                c_prob = c_priors.get(move, 0.01)
+                                policy[move] = 0.7 * policy[move] + 0.3 * c_prob
                         # Renormalize
                         total_p = sum(policy.values())
                         if total_p > 0:
@@ -3100,7 +3112,7 @@ def self_play_game_v2(
             break
 
         # --- DISTANT EXPLORATION: force non-adjacent placements early ---
-        if move_count < 15 and random.random() < 0.20:
+        if PLAY_STYLE == 'distant' and move_count < 15 and random.random() < 0.20:
             existing = set()
             if hasattr(game, 'stones_0'):
                 existing = game.stones_0 | game.stones_1
@@ -3185,7 +3197,7 @@ def self_play_game_v2(
             sample.priority *= 0.5
 
     # --- DIVERSITY BONUS: reward games with spread-out stone placement ---
-    if game.total_stones > 10:
+    if PLAY_STYLE == 'distant' and game.total_stones > 10:
         all_stones = []
         if hasattr(game, 'stones_0'):
             all_stones = list(game.stones_0) + list(game.stones_1)
