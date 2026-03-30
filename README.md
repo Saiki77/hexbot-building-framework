@@ -9,6 +9,7 @@ A Python framework for building bots for [Hexagonal Tic-Tac-Toe](https://hexo.di
 - [Installation](#installation)
 - [Game Rules](#game-rules)
 - [Quick Start](#quick-start)
+- [Training Dashboard](#training-dashboard)
 - [Building Your First Bot](#building-your-first-bot)
 - [Six Bot Approaches (End-to-End)](#six-bot-approaches-end-to-end)
   - [1. Hand-Tuned Evaluation](#approach-1-hand-tuned-evaluation)
@@ -304,6 +305,139 @@ print(f"Your bot: {result.wins[0]}W, Heuristic: {result.wins[1]}W")
 ```
 
 Any function that takes a game and returns a `(q, r)` move works as a bot. You can also create a class with a `best_move(game)` method.
+
+---
+
+## Training Dashboard
+
+A live training dashboard that visualizes games, tracks ELO, loss curves, and more. Works with any bot — the framework's built-in bots or your own.
+
+### Quick Start
+
+```bash
+python test_dashboard.py       # test the UI with fake data (port 5002)
+```
+
+### Use with Framework Bots
+
+Feed game results from an Arena into the dashboard:
+
+```python
+from hexbot import HexGame, Bot, Arena
+from dashboard import Dashboard
+
+dash = Dashboard(port=5001)
+dash.start()
+
+bot_a = Bot.heuristic()
+bot_b = Bot.heuristic()
+
+for iteration in range(100):
+    for g in range(10):
+        game = HexGame()
+        moves = []
+        while not game.is_over:
+            bot = bot_a if game.current_player == 0 else bot_b
+            move = bot.best_move(game)
+            moves.append(list(move))
+            game.place(*move)
+        result = 1.0 if game.winner == 0 else -1.0
+        dash.add_game(moves, result)
+
+    dash.add_metric(iteration=iteration, elo=1000 + iteration * 2)
+```
+
+### Use with Your Own Bot
+
+Any code that produces games can feed the dashboard — just call `add_game()`:
+
+```python
+from dashboard import Dashboard
+
+dash = Dashboard(port=5001)
+dash.start()
+
+# Your training loop
+for i in range(1000):
+    moves, result = my_training_function()  # your code
+    dash.add_game(moves, result)
+    dash.add_metric(iteration=i, loss=my_loss, elo=my_elo)
+    dash.update_progress(step=i, total=1000, loss=my_loss)
+```
+
+### REST API
+
+Push data from any language or process via HTTP:
+
+```bash
+# Submit a game
+curl -X POST http://localhost:5001/api/game \
+  -H 'Content-Type: application/json' \
+  -d '{"moves": [[0,0],[1,0],[0,1],[2,0]], "result": 1.0}'
+
+# Submit metrics
+curl -X POST http://localhost:5001/api/metric \
+  -H 'Content-Type: application/json' \
+  -d '{"iteration": 5, "loss": {"total": 0.82}, "elo": 1100}'
+
+# Read stats
+curl http://localhost:5001/api/stats
+curl http://localhost:5001/api/elo
+curl http://localhost:5001/api/games
+```
+
+### WebSocket API
+
+Connect via Socket.IO for real-time streaming:
+
+```javascript
+const socket = io('http://localhost:5001');
+
+// Send a game result
+socket.emit('game_result', {
+  moves: [[0,0],[1,0],[0,1]],
+  result: 1.0
+});
+
+// Send metrics
+socket.emit('metric', {
+  iteration: 5,
+  loss: { total: 0.82 },
+  elo: 1100
+});
+
+// Listen for updates
+socket.on('game_complete', d => console.log('Game:', d));
+socket.on('stats_update', d => console.log('Stats:', d));
+```
+
+### Settings
+
+Click the gear icon (&#9881;) in the header to adjust:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Replay speed | 120ms | Speed of game replay animation |
+| Dot size | 2 | Size of empty hex grid dots |
+| Grid radius | 2 | How many empty hexes shown around stones |
+| Auto-refresh | On | Periodically refresh charts |
+
+All settings are saved to your browser's localStorage.
+
+### Available Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/stats` | Current aggregate stats |
+| `GET` | `/api/elo` | ELO history array |
+| `GET` | `/api/losses` | Loss history array |
+| `GET` | `/api/games` | Recent 50 game move histories |
+| `GET` | `/api/resources` | CPU/RAM history |
+| `GET` | `/api/winrates` | Win rate history |
+| `GET` | `/api/gamelength` | Game length history |
+| `GET` | `/api/speed` | Training speed history |
+| `POST` | `/api/game` | Submit a completed game |
+| `POST` | `/api/metric` | Submit training metrics |
 
 ---
 
