@@ -304,16 +304,28 @@ def compute_threat_label(game: HexGame) -> np.ndarray:
 # C Engine Integration - CGameState (50x faster game simulation)
 # ---------------------------------------------------------------------------
 
-_engine_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'engine.so')
 _c_lib = None
 
 def _get_lib():
+    """Load the C engine, auto-compiling if needed via hexgame."""
     global _c_lib
     if _c_lib is None:
-        if not _os.path.exists(_engine_path):
-            raise RuntimeError(f"C engine not found at {_engine_path}")
-        _c_lib = ctypes.CDLL(_engine_path)
-        _setup_c_signatures(_c_lib)
+        # Use hexgame's engine loader which auto-compiles
+        try:
+            from hexgame import _load_engine
+            _c_lib = _load_engine()
+            _setup_c_signatures(_c_lib)
+        except Exception:
+            # Fallback: try loading directly
+            engine_path = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                'engine.so')
+            if not _os.path.exists(engine_path):
+                raise RuntimeError(
+                    f"C engine not found. Run from the repo directory or "
+                    f"compile manually: cc -O3 -shared -fPIC -o engine.so engine.c")
+            _c_lib = ctypes.CDLL(engine_path)
+            _setup_c_signatures(_c_lib)
     return _c_lib
 
 def _setup_c_signatures(lib):

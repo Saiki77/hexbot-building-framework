@@ -1077,9 +1077,11 @@ class OrcaTrainer:
             net_state = {k: v.cpu() for k, v in self.net.state_dict().items()}
             print(f"  |  Self-play: V2 (C engine + MCTS {current_sims} sims)...")
 
+            # More games per future on CUDA (avoid "too many open files")
+            GAMES_PER_FUTURE = 4 if self.device.type == 'cuda' else 2
+
             with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
                 futures = []
-                GAMES_PER_FUTURE = 2
                 flat_positions = []
                 for c, pos in zip(chunks, chunk_positions):
                     for gi in range(c):
