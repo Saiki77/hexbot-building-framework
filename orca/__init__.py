@@ -70,12 +70,48 @@ class Orca:
                     break
 
         if checkpoint_path is None:
+            # Auto-download from GitHub release
+            checkpoint_path = Orca._auto_download()
+
+        if checkpoint_path is None:
             raise FileNotFoundError(
-                "No checkpoint found. Download pretrained.pt or train with: "
-                "python -m orca.train"
+                "No checkpoint found and auto-download failed. "
+                "Train with: python -m orca.train"
             )
 
-        return Bot.load(checkpoint_path, sims=sims, search=search)
+        bot = Bot.load(checkpoint_path)
+        bot._sims = sims
+        bot._search_type = search
+        return bot
+
+    @staticmethod
+    def _auto_download() -> str:
+        """Download the pre-trained checkpoint from GitHub releases."""
+        import urllib.request
+
+        url = ("https://github.com/Saiki77/hexbot-building-framework/"
+               "releases/download/v4.0.0/checkpoint.pt")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        save_dir = os.path.join(root, 'orca')
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, 'checkpoint.pt')
+
+        if os.path.exists(save_path):
+            return save_path
+
+        print(f"Downloading Orca checkpoint (~45MB)...")
+        try:
+            urllib.request.urlretrieve(url, save_path)
+            print(f"Saved to {save_path}")
+            return save_path
+        except Exception as e:
+            # Try alternative: pretrained.pt in root
+            alt = os.path.join(root, 'pretrained.pt')
+            if os.path.exists(alt):
+                return alt
+            print(f"Download failed: {e}")
+            print("Train from scratch with: python -m orca.train")
+            return None
 
     @staticmethod
     def train(**kwargs):

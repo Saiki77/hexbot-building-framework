@@ -999,10 +999,9 @@ class Bot:
 
     @classmethod
     def orca(cls, sims: int = 200) -> Bot:
-        """Load the pre-trained Orca bot (v3).
+        """Load the pre-trained Orca bot.
 
-        The Orca bot uses a 3.9M parameter network (128 filters, 12 residual
-        blocks) trained via AlphaZero-style self-play with MCTS.
+        Auto-downloads the checkpoint from GitHub on first use if not found locally.
 
         Args:
             sims: MCTS simulations per move (default 200).
@@ -1010,18 +1009,9 @@ class Bot:
         Returns:
             Bot loaded with Orca checkpoint.
         """
-        import os
-        orca_path = os.path.join(os.path.dirname(__file__), 'orca', 'checkpoint.pt')
-        pretrained_path = os.path.join(os.path.dirname(__file__), 'pretrained.pt')
-        for path in [orca_path, pretrained_path]:
-            if os.path.exists(path):
-                bot = cls.load(path)
-                bot._sims = sims
-                return bot
-        raise FileNotFoundError(
-            "No Orca checkpoint found. Download pretrained.pt or train with: "
-            "python -m orca.train"
-        )
+        from orca import Orca
+        bot = Orca.load(sims=sims)
+        return bot
 
     def __repr__(self):
         if self._search_type in ('random', 'heuristic'):
