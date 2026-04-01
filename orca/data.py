@@ -38,6 +38,7 @@ try:
         PLAY_STYLE, C_BLEND_ADJACENT, C_BLEND_DISTANT,
         DISTANT_EXPLORE_PROB, DISTANT_RANGE,
         DIRICHLET_ALPHA, DIRICHLET_EPSILON,
+        BLOCKING_PRIORITY_BOOST, SURVIVAL_PRIORITY_BOOST,
     )
 except ImportError:
     BOARD_SIZE = 19
@@ -57,6 +58,8 @@ except ImportError:
     DISTANT_RANGE = (2, 5)
     DIRICHLET_ALPHA = 0.3
     DIRICHLET_EPSILON = 0.25
+    BLOCKING_PRIORITY_BOOST = 3.0
+    SURVIVAL_PRIORITY_BOOST = 2.0
 
 # Imports from sibling modules
 from orca.encoding import (
@@ -1024,9 +1027,9 @@ def self_play_game_v2(
                     threats = sum(1 for m in game.legal_moves()
                                   if _line_through_candidate(game, m[0], m[1], prev_player) >= 6)
                 if threats >= 3:
-                    samples[-1].priority = max(samples[-1].priority, 5.0)
+                    samples[-1].priority = max(samples[-1].priority, BLOCKING_PRIORITY_BOOST * 1.7)
                 elif threats >= 2:
-                    samples[-1].priority = max(samples[-1].priority, 3.5)
+                    samples[-1].priority = max(samples[-1].priority, BLOCKING_PRIORITY_BOOST * 1.2)
             except Exception:
                 pass
 
@@ -1040,10 +1043,10 @@ def self_play_game_v2(
                     opp_threats_now = 0
                 if prev_opp_threats > 0 and opp_threats_now < prev_opp_threats:
                     # Successfully blocked opponent threat
-                    samples[-1].priority = max(samples[-1].priority, 3.0)
+                    samples[-1].priority = max(samples[-1].priority, BLOCKING_PRIORITY_BOOST)
                 elif prev_opp_threats > 0 and opp_threats_now >= prev_opp_threats:
                     # Survived but didn't reduce threats - still valuable
-                    samples[-1].priority = max(samples[-1].priority, 2.0)
+                    samples[-1].priority = max(samples[-1].priority, SURVIVAL_PRIORITY_BOOST)
                 prev_opp_threats = opp_threats_now
             except Exception:
                 pass
@@ -1057,24 +1060,23 @@ def self_play_game_v2(
             sample.priority = 2.0
 
     # Progressive short-game penalty / long-game bonus
+    # Very short games are likely noise; 30+ moves is a real game (1.0x)
     if n < 10:
         return [], move_history, analysis_data  # discard junk games
     elif n < 20:
         for sample in samples:
-            sample.priority *= 0.2
+            sample.priority *= 0.3
     elif n < 30:
         for sample in samples:
-            sample.priority *= 0.4
-    elif n < 40:
-        for sample in samples:
-            sample.priority *= 0.7
-    # Long game bonus
+            sample.priority *= 0.6
+    # 30+ moves: no penalty (1.0x) — these are real games
+    # Long game bonus: deeper games have richer training signal
     if n >= 60:
         for sample in samples:
-            sample.priority *= 1.8
+            sample.priority *= 1.5
     elif n >= 45:
         for sample in samples:
-            sample.priority *= 1.3
+            sample.priority *= 1.2
 
     # --- DIVERSITY BONUS ---
     if PLAY_STYLE == 'distant' and game.total_stones > 10:
