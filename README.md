@@ -136,10 +136,21 @@ orca/
   transformer_net.py   Transformer architecture
   hex_gnn.py           Graph neural network
   multiscale_net.py    Multi-scale architecture
+  benchmark.py         Platform benchmark (compare Mac/CUDA/CPU)
   checkpoint.pt        Pre-trained weights
 docs/                  Detailed documentation
 examples/              Example bot scripts
 ```
+
+## Benchmark
+
+Compare performance across platforms:
+
+```bash
+python -m orca.benchmark --quick    # ~30 seconds
+```
+
+Measures: C engine speed, NN inference, MCTS search, self-play, training steps, augmentation.
 
 ## Device Support
 

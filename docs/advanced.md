@@ -453,6 +453,63 @@ producing richer defensive training data.
 
 ---
 
+## Platform Benchmark (v4.1)
+
+Compare performance across Mac (MPS), CUDA, and CPU to identify bottlenecks.
+
+```bash
+python -m orca.benchmark              # full benchmark (~2 min)
+python -m orca.benchmark --quick      # fast subset (~30s)
+python -m orca.benchmark --section nn # specific section only
+python -m orca.benchmark --output bench.json  # save for comparison
+```
+
+### Sections
+
+| Section | What it measures |
+|---------|-----------------|
+| `engine` | C engine: random games/s, scored moves/s, AB search nodes/s, clone/s, undo/s, threats/s |
+| `nn` | NN forward pass per architecture at batch sizes 1/8/32/64 |
+| `latency` | Single-position NN latency: mean, p50, p95, p99 |
+| `search` | MCTS searches/sec at 50/100/200 sims with different batch sizes |
+| `selfplay` | Full game generation: time/game, moves, games/hour |
+| `training` | Gradient steps/sec at batch 256/512/1024 |
+| `augmentation` | Augments/sec (7 hex transforms per sample) |
+| `replay` | Buffer push + sample speed |
+
+### Comparing Platforms
+
+Save results to JSON for comparison:
+
+```bash
+# On Mac
+python -m orca.benchmark --output bench_mac.json
+
+# On CUDA machine
+python -m orca.benchmark --output bench_cuda.json
+```
+
+Key metrics to compare:
+- **NN inference** (nn section): CUDA should be 5-10x faster at batch=64
+- **Training step** (training section): CUDA with mixed precision should be 10-50x faster
+- **Self-play** (selfplay section): similar on both (C engine runs on CPU)
+- **C engine** (engine section): depends on CPU, not GPU
+
+### Typical Results
+
+| Metric | Mac M3 (MPS) | RTX 4080 (CUDA) |
+|--------|-------------|-----------------|
+| NN inference (bs=64) | ~2.2K pos/s | ~10K+ pos/s |
+| NN latency | ~3ms | ~1ms |
+| Training (bs=1024) | ~0.6 steps/s | ~10+ steps/s |
+| Self-play (50 sims) | ~2500 games/hr | ~2500 games/hr |
+| C engine (random) | ~600 games/s | ~600 games/s |
+
+The training step is the main bottleneck on Mac (MPS is slow for gradient computation).
+On CUDA, self-play becomes the bottleneck because the C engine runs on CPU.
+
+---
+
 ## Running Tests
 
 ```bash

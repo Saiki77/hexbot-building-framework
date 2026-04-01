@@ -602,6 +602,21 @@ The package is defined in `pyproject.toml` and includes all dependencies.
 
 ---
 
+## Platform Benchmark (v4.1)
+
+```bash
+python -m orca.benchmark              # full benchmark
+python -m orca.benchmark --quick      # fast subset
+python -m orca.benchmark --section nn,training  # specific sections
+python -m orca.benchmark --output results.json  # save to file
+```
+
+Sections: `engine`, `nn`, `latency`, `search`, `selfplay`, `training`, `augmentation`, `replay`.
+
+See [Advanced docs](advanced.md#platform-benchmark-v41) for full details and platform comparison.
+
+---
+
 ## Next Steps
 
 - [Getting Started](getting-started.md) - learn the HexGame API with examples
