@@ -260,11 +260,11 @@ def bench_search() -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# 4b. GPU Self-play (threaded, CUDA only)
+# 4b. Threaded Self-play (CUDA benefits most, MPS has GIL issues)
 # ---------------------------------------------------------------------------
 
 def bench_gpu_selfplay(n_games=3) -> Dict:
-    """Threaded self-play with shared GPU network (no process spawn overhead)."""
+    """Threaded self-play with shared network. Best on CUDA, slower on MPS."""
     import torch
     from bot import get_device
 
@@ -313,6 +313,46 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
         'throughput_factor': (n / wall_time) / (1 / (sum(times) / max(n, 1))) if times else 0,
         'avg_game_length': sum(lengths) / max(n, 1),
         'checkpoint_loaded': loaded,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4c. CPU Self-play (for Mac comparison: is MPS actually faster than CPU?)
+# ---------------------------------------------------------------------------
+
+def bench_cpu_selfplay(n_games=3) -> Dict:
+    """Self-play forced to CPU for comparison against MPS/CUDA."""
+    import torch
+    from orca.network import create_network
+    from orca.search import BatchedMCTS
+    from bot import get_device
+
+    import io, contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        from orca.data import self_play_game_v2
+
+    # Force CPU
+    net, loaded = _load_checkpoint_net(torch.device('cpu'))
+    net = net.to('cpu')
+    mcts = BatchedMCTS(net, num_simulations=50, batch_size=32)
+
+    times, lengths = [], []
+    for _ in range(n_games):
+        t0 = time.perf_counter()
+        with contextlib.redirect_stdout(io.StringIO()):
+            samples, moves, *_ = self_play_game_v2(net, mcts)
+        times.append(time.perf_counter() - t0)
+        lengths.append(len(moves))
+
+    total = sum(times)
+    return {
+        'games': n_games,
+        'total_time': total,
+        'avg_time_per_game': total / n_games,
+        'games_per_hour': n_games / total * 3600,
+        'avg_game_length': sum(lengths) / n_games,
+        'checkpoint_loaded': loaded,
+        'device': 'cpu',
     }
 
 
@@ -555,6 +595,19 @@ def print_report(results: Dict, device_info: Dict):
             print(f"|    wall={gsp['wall_time']:.1f}s for {gsp['games']} games  parallelism={factor:.1f}x".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
+    if 'cpu_selfplay' in results:
+        csp = results['cpu_selfplay']
+        ckpt = "checkpoint" if csp.get('checkpoint_loaded') else "random weights"
+        print(f"|  CPU SELF-PLAY (50 sims, forced CPU, {ckpt})".ljust(W - 1) + "|")
+        print(f"|    {csp['avg_time_per_game']:.1f}s/game  {csp['avg_game_length']:.0f} moves  {csp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
+        # Show comparison if we have the main selfplay result
+        if 'selfplay' in results:
+            sp = results['selfplay']
+            ratio = csp['games_per_hour'] / max(sp['games_per_hour'], 1)
+            faster = "GPU" if ratio < 1 else "CPU"
+            print(f"|    vs GPU self-play: {faster} is {abs(1/ratio - 1)*100 if ratio < 1 else abs(ratio - 1)*100:.0f}% faster".ljust(W - 1) + "|")
+        print("|" + "-" * (W - 2) + "|")
+
     # Training
     if 'training' in results:
         tr = results['training']
@@ -629,7 +682,7 @@ Examples:
         device_info['gpu'] = 'Apple MPS'
 
     sections = args.section.lower().split(',') if args.section != 'all' else [
-        'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay', 'training', 'augmentation', 'replay'
+        'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay', 'cpu_selfplay', 'training', 'augmentation', 'replay'
     ]
 
     results = {}
@@ -654,6 +707,9 @@ Examples:
         elif section == 'gpu_selfplay':
             n = 3 if args.quick else 10
             results['gpu_selfplay'] = bench_gpu_selfplay(n)
+        elif section == 'cpu_selfplay':
+            n = 3 if args.quick else 5
+            results['cpu_selfplay'] = bench_cpu_selfplay(n)
         elif section == 'training':
             n = 5 if args.quick else 20
             results['training'] = bench_training(n)

@@ -1260,8 +1260,8 @@ class OrcaTrainer:
         collected_samples = []
         worker_errors = 0
 
-        if use_v2 and self.device.type in ('cuda', 'mps'):
-            # GPU-accelerated self-play: threaded workers + shared GPU inference
+        if use_v2 and self.device.type == 'cuda':
+            # Threaded self-play: shared GPU network (CUDA only, MPS has GIL issues)
             return self._run_gpu_self_play(
                 current_sims, current_games, all_positions, replay_buffer)
 
