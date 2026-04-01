@@ -172,18 +172,8 @@ def update_curriculum_plateau(current_elo: float) -> None:
 
 
 def get_curriculum_games(iteration: int, base: int) -> int:
-    """Scale games relative to configured base: more when sims are low, fewer when high.
-
-    Returns a value relative to `base` (the user's configured games_per_iter).
-    Early training plays more games (1.5x base) at lower sim counts,
-    then scales down to base as sims increase.
-    """
-    from orca.config import NUM_SIMULATIONS
-    sims = get_curriculum_sims(iteration, NUM_SIMULATIONS)
-    frac = sims / max(NUM_SIMULATIONS, 1)
-    # At 25% sims -> 1.5x games, at 100% sims -> 1.0x games
-    scale = 1.5 - 0.5 * min(frac, 1.0)
-    return max(10, int(base * scale))
+    """Return configured games_per_iter directly (no scaling)."""
+    return base
 
 
 # ---------------------------------------------------------------------------
