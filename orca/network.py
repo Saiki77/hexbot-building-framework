@@ -452,13 +452,19 @@ def export_onnx(net: HexNet, path: str = '/tmp/hex_model.onnx'):
             return self.net.forward_pv(x)
 
     wrapper = _PVWrapper(net_cpu)
-    with warnings.catch_warnings():
+    import io, contextlib, logging
+    # Suppress torch.onnx verbose logging (✅ emojis etc.)
+    onnx_logger = logging.getLogger('torch.onnx')
+    prev_level = onnx_logger.level
+    onnx_logger.setLevel(logging.ERROR)
+    with warnings.catch_warnings(), contextlib.redirect_stderr(io.StringIO()):
         warnings.simplefilter("ignore")
         torch.onnx.export(
             wrapper, dummy, path,
             input_names=['state'],
             output_names=['policy', 'value'],
         )
+    onnx_logger.setLevel(prev_level)
     return path
 
 
