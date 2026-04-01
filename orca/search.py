@@ -774,12 +774,16 @@ class BatchedMCTS:
         """
         root = MCTSNode(parent=None, move=None, prior=0.0, player=game.current_player)
 
-        # --- AB HYBRID: quick depth-4 search to detect forced wins ---
+        # --- AB HYBRID: configurable depth search to detect forced wins ---
         try:
-            if hasattr(game, '_lib'):
+            from orca.config import USE_AB_HYBRID, AB_HYBRID_DEPTH
+        except ImportError:
+            USE_AB_HYBRID, AB_HYBRID_DEPTH = True, 4
+        try:
+            if USE_AB_HYBRID and AB_HYBRID_DEPTH > 0 and hasattr(game, '_lib'):
                 ab_val = ctypes.c_float(0)
                 ab_ste = ctypes.c_int(0)
-                game._lib.c_ab_solve(game._ptr, 4,
+                game._lib.c_ab_solve(game._ptr, AB_HYBRID_DEPTH,
                                       ctypes.byref(ab_val), ctypes.byref(ab_ste))
                 if abs(ab_val.value) >= 1.0:
                     # Proven win/loss - skip MCTS entirely
@@ -898,7 +902,30 @@ class BatchedMCTS:
             self._run_batch(root, game, batch, enc_fn, dec_fn)
             sims_done += batch
 
+        # Store last root for analysis (value estimate + top moves)
+        self._last_root = root
+
         return self._get_policy(root, temperature)
+
+    @property
+    def last_root_value(self) -> float:
+        """Return the Q-value of the root after the last search."""
+        root = getattr(self, '_last_root', None)
+        if root is None or root.visit_count == 0:
+            return 0.0
+        return root.q_value
+
+    def last_top_moves(self, n: int = 5):
+        """Return top-n moves from last search as [(q, r, visit_fraction), ...]."""
+        root = getattr(self, '_last_root', None)
+        if root is None or not root.children:
+            return []
+        total = sum(c.visit_count for c in root.children.values())
+        if total == 0:
+            return []
+        ranked = sorted(root.children.items(),
+                        key=lambda x: x[1].visit_count, reverse=True)[:n]
+        return [(m[0], m[1], c.visit_count / total) for m, c in ranked]
 
     def _run_batch(self, root, game, batch_size, enc_fn, dec_fn):
         """Select, evaluate, and backup a batch of leaves."""

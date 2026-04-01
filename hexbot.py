@@ -660,7 +660,8 @@ def self_play(net=None, sims: int = 200, batch_size: int = 64, use_c_engine: boo
         net = bot._net
     net.eval()
     mcts = BatchedMCTS(net, num_simulations=sims, batch_size=batch_size)
-    return self_play_game_v2(net, mcts, use_c_engine=use_c_engine)
+    samples, move_history, analysis_data = self_play_game_v2(net, mcts, use_c_engine=use_c_engine)
+    return samples, move_history, analysis_data
 
 
 def train_step(net, optimizer, replay_buffer, device=None):
@@ -1185,7 +1186,7 @@ def train(
         net.eval()
         samples_collected = []
         for g in range(games_per_iter):
-            samples, moves = self_play_game_v2(net, mcts)
+            samples, moves, _analysis = self_play_game_v2(net, mcts)
             for s in samples:
                 replay_buffer.push(s)
                 samples_collected.append(s)

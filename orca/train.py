@@ -77,7 +77,8 @@ class PrintObserver:
 
     def on_game_complete(self, game_idx: int, total_games: int,
                          move_history: list, result: float,
-                         num_samples: int) -> None:
+                         num_samples: int,
+                         analysis_data: list = None) -> None:
         winner = "P0" if result > 0 else ("P1" if result < 0 else "draw")
         print(f"  |  Game {game_idx}/{total_games}: {winner} "
               f"in {len(move_history)} moves ({num_samples} samples)")
@@ -220,7 +221,7 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
                 pos, hints = entry
             elif isinstance(entry, dict):
                 pos = entry
-        samples, move_history = self_play_game_v2(
+        samples, move_history, analysis_data = self_play_game_v2(
             net, searcher, start_position=pos, hint_moves=hints)
         t_game = _time.perf_counter() - t_game
         winner = "P0" if (samples and samples[0].result > 0) else "P1"
@@ -239,7 +240,7 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
             })
         result_val = samples[0].result if samples else 0.0
         results.append((serialized, [list(m) for m in move_history],
-                        result_val, len(samples)))
+                        result_val, len(samples), analysis_data))
     return results
 
 
@@ -327,62 +328,132 @@ class ModelVault:
 # ---------------------------------------------------------------------------
 
 class GenerationalArena:
-    """Evaluates current model via mini round-robin against past generations."""
+    """Evaluates current model via round-robin + baseline matches.
+
+    Plays against:
+    1. Past generations from the model vault (relative improvement)
+    2. Random bot (anchored baseline, expected ~500 ELO)
+    3. Heuristic bot (anchored baseline, expected ~1000 ELO)
+
+    The combined score gives a more accurate ELO than generations alone.
+    """
 
     def __init__(self, device: torch.device, games_per_opponent: int = 4,
-                 num_sims: int = 30, max_opponents: int = 6):
+                 num_sims: int = 30, max_opponents: int = 6,
+                 baseline_games: int = 4):
         self.device = device
         self.games_per_opponent = games_per_opponent
         self.num_sims = num_sims
         self.max_opponents = max_opponents
+        self.baseline_games = baseline_games
         self.matchup_history: list = []
 
     def evaluate(self, current_net: HexNet, vault: ModelVault,
                  current_elo: float) -> float:
-        """Play mini round-robin against selected past generations."""
+        """Play round-robin + baselines. Returns updated ELO."""
+        import math
         current_net.eval()
-        n = len(vault)
-        if n == 0:
-            return current_elo
-
-        opponent_indices = self._select_opponents(n)
         mcts_cur = MCTS(current_net, num_simulations=self.num_sims)
 
         total_wins = total_losses = total_draws = 0
         matchups = {}
 
-        for opp_idx in opponent_indices:
-            opp_net = vault.get_net(opp_idx, self.device)
-            mcts_opp = MCTS(opp_net, num_simulations=self.num_sims)
-            opp_iter = vault.models[opp_idx][0]
+        # 1. Play against past generations
+        n = len(vault)
+        if n > 0:
+            opponent_indices = self._select_opponents(n)
+            for opp_idx in opponent_indices:
+                opp_net = vault.get_net(opp_idx, self.device)
+                mcts_opp = MCTS(opp_net, num_simulations=self.num_sims)
+                opp_iter = vault.models[opp_idx][0]
+                w = l = d = 0
+                for g in range(self.games_per_opponent):
+                    if g % 2 == 0:
+                        r = self._play(mcts_cur, mcts_opp)
+                    else:
+                        r = -self._play(mcts_opp, mcts_cur)
+                    if r > 0: w += 1
+                    elif r < 0: l += 1
+                    else: d += 1
+                matchups[f"gen_{opp_iter}"] = {"w": w, "l": l, "d": d}
+                total_wins += w; total_losses += l; total_draws += d
+                del opp_net, mcts_opp
 
-            w = l = d = 0
-            for g in range(self.games_per_opponent):
-                if g % 2 == 0:
-                    r = self._play(mcts_cur, mcts_opp)
-                else:
-                    r = -self._play(mcts_opp, mcts_cur)
-                if r > 0:
-                    w += 1
-                elif r < 0:
-                    l += 1
-                else:
-                    d += 1
+        # 2. Play against random baseline (anchored at ~500 ELO)
+        if self.baseline_games > 0:
+            w_rand, l_rand = self._play_vs_baseline(mcts_cur, 'random')
+            matchups["vs_random"] = {"w": w_rand, "l": l_rand, "d": 0}
+            total_wins += w_rand; total_losses += l_rand
 
-            matchups[opp_iter] = {"w": w, "l": l, "d": d}
-            total_wins += w
-            total_losses += l
-            total_draws += d
-            del opp_net, mcts_opp
+        # 3. Play against heuristic baseline (anchored at ~1000 ELO)
+        if self.baseline_games > 0:
+            w_heur, l_heur = self._play_vs_baseline(mcts_cur, 'heuristic')
+            matchups["vs_heuristic"] = {"w": w_heur, "l": l_heur, "d": 0}
+            total_wins += w_heur; total_losses += l_heur
 
         self.matchup_history.append(matchups)
 
+        # Compute ELO from combined results
         total_games = total_wins + total_losses + total_draws
         if total_games == 0:
             return current_elo
-        score = (total_wins + 0.5 * total_draws) / total_games
-        new_elo = current_elo + 16 * (score - 0.5) * len(opponent_indices)
+
+        # Weighted ELO: generational score + baseline anchoring
+        gen_score = (total_wins + 0.5 * total_draws) / total_games
+        gen_elo = current_elo + 16 * (gen_score - 0.5) * max(1, n)
+
+        # Anchor from baselines (more stable reference)
+        if self.baseline_games > 0:
+            rand_wr = w_rand / max(self.baseline_games, 1)
+            heur_wr = w_heur / max(self.baseline_games, 1)
+            rand_wr = max(0.05, min(0.95, rand_wr))
+            heur_wr = max(0.05, min(0.95, heur_wr))
+            rand_elo = 500 + 400 * math.log10(rand_wr / (1 - rand_wr))
+            heur_elo = 1000 + 400 * math.log10(heur_wr / (1 - heur_wr))
+            # Blend: 60% generational + 20% random-anchored + 20% heuristic-anchored
+            new_elo = 0.6 * gen_elo + 0.2 * rand_elo + 0.2 * heur_elo
+        else:
+            new_elo = gen_elo
+
         return new_elo
+
+    def _play_vs_baseline(self, mcts_cur, baseline_type: str):
+        """Play against a baseline bot. Returns (wins, losses)."""
+        wins = losses = 0
+        for g in range(self.baseline_games):
+            game = HexGame(candidate_radius=2, max_total_stones=200)
+            cur_is_p0 = (g % 2 == 0)
+            while not game.is_terminal:
+                if (game.current_player == 0) == cur_is_p0:
+                    # Current model's turn
+                    policy = mcts_cur.search(game, temperature=0.1, add_noise=False)
+                    if not policy:
+                        break
+                    best = max(policy, key=policy.get)
+                else:
+                    # Baseline's turn
+                    if baseline_type == 'random':
+                        candidates = game.legal_moves()
+                        best = candidates[random.randint(0, len(candidates) - 1)]
+                    else:  # heuristic
+                        try:
+                            from bot import find_forced_move as _ffm
+                            forced = _ffm(game)
+                            if forced:
+                                best = forced
+                            else:
+                                candidates = game.legal_moves()
+                                best = candidates[0] if candidates else (0, 0)
+                        except Exception:
+                            candidates = game.legal_moves()
+                            best = candidates[0] if candidates else (0, 0)
+                game.place_stone(*best)
+            result = game.result()
+            if not cur_is_p0:
+                result = -result
+            if result > 0: wins += 1
+            elif result < 0: losses += 1
+        return wins, losses
 
     def _select_opponents(self, n: int) -> list:
         if n <= self.max_opponents:
@@ -563,6 +634,7 @@ class OrcaTrainer:
         # Arena
         elo_sims: Optional[int] = None,
         elo_max_opponents: Optional[int] = None,
+        elo_baseline_games: Optional[int] = None,
     ):
         from orca.config import (
             DEFAULT_GAMES_PER_ITER, DEFAULT_TRAIN_STEPS,
@@ -571,6 +643,7 @@ class OrcaTrainer:
             NUM_SIMULATIONS as CFG_SIMS, MCTS_BATCH_SIZE as CFG_MCTS_BS,
             REPLAY_BUFFER_SIZE as CFG_BUF, BATCH_SIZE as CFG_BATCH,
             ELO_EVAL_EVERY, ELO_EVAL_GAMES, ELO_EVAL_SIMS, ELO_MAX_OPPONENTS,
+            ELO_BASELINE_GAMES,
             MAX_WORKERS, VAULT_MAX_MODELS,
             PLATEAU_THRESHOLD, PLATEAU_ITERS, PLATEAU_SIM_BOOST,
         )
@@ -604,6 +677,7 @@ class OrcaTrainer:
         self.elo_games = elo_games or ELO_EVAL_GAMES
         self.elo_sims = elo_sims or ELO_EVAL_SIMS
         self.elo_max_opponents = elo_max_opponents or ELO_MAX_OPPONENTS
+        self.elo_baseline_games = elo_baseline_games if elo_baseline_games is not None else ELO_BASELINE_GAMES
 
         # Plateau
         self.plateau_threshold = plateau_threshold or PLATEAU_THRESHOLD
@@ -627,7 +701,13 @@ class OrcaTrainer:
         # Initialized in run()
         self.net: Optional[HexNet] = None
         self.model_vault = ModelVault(max_models=vault_size or VAULT_MAX_MODELS)
-        self.arena = GenerationalArena(self.device)
+        self.arena = GenerationalArena(
+            self.device,
+            games_per_opponent=self.elo_games,
+            num_sims=self.elo_sims,
+            max_opponents=self.elo_max_opponents,
+            baseline_games=self.elo_baseline_games,
+        )
 
         # Simple metrics dict (replaces MetricsStore)
         self.metrics: Dict = {
@@ -682,11 +762,20 @@ class OrcaTrainer:
             print(f"  Engine:      Python (v1) -- C engine unavailable: {e}")
 
         optimizer = torch.optim.Adam(
-            self.net.parameters(), lr=0.001, weight_decay=L2_REG)
+            self.net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=50, T_mult=2, eta_min=1e-4)
+            optimizer, T_0=self.scheduler_T0, T_mult=self.scheduler_Tmult,
+            eta_min=self.scheduler_eta_min)
         replay_buffer = ReplayBuffer()
         auto_tuner = AutoTuner()
+
+        # Mixed precision (CUDA only)
+        grad_scaler = None
+        if self.use_mixed_precision:
+            grad_scaler = torch.amp.GradScaler('cuda')
+            print(f"  Mixed precision: ON (FP16)")
+        else:
+            print(f"  Mixed precision: OFF ({self.device.type})")
 
         # -- Resume from checkpoint ------------------------------------------
         start_iteration = 0
@@ -695,6 +784,14 @@ class OrcaTrainer:
                 optimizer, scheduler, replay_buffer, auto_tuner)
         else:
             print(f"  Fresh start (--fresh)")
+
+        # torch.compile for CUDA (after checkpoint restore)
+        if self.device.type == 'cuda' and hasattr(torch, 'compile'):
+            try:
+                self.net = torch.compile(self.net, mode='reduce-overhead')
+                print(f"  torch.compile: ON")
+            except Exception as e:
+                print(f"  torch.compile: failed ({e})")
 
         print(f"  Workers:     {self.num_workers}")
         print(f"  LR:          {optimizer.param_groups[0]['lr']:.5f}")
@@ -784,7 +881,8 @@ class OrcaTrainer:
                 self.net.train()
                 for step in range(actual_steps):
                     losses = train_step(
-                        self.net, optimizer, replay_buffer, self.device)
+                        self.net, optimizer, replay_buffer, self.device,
+                        grad_scaler=grad_scaler)
                 train_time = time.perf_counter() - t1
                 sps = actual_steps / train_time if train_time > 0 else 0
                 scheduler.step()
@@ -798,9 +896,9 @@ class OrcaTrainer:
                 print(f"  |  Training skipped: buffer too small "
                       f"({len(replay_buffer)}<{BATCH_SIZE})")
 
-            # -- ELO evaluation (every 2 iterations) -------------------------
+            # -- ELO evaluation (every N iterations) --------------------------
             elo_str = ""
-            if len(replay_buffer) >= BATCH_SIZE and (iteration + 1) % 2 == 0:
+            if len(replay_buffer) >= BATCH_SIZE and (iteration + 1) % self.elo_every == 0:
                 self.model_vault.add(iteration + 1, self.net.state_dict())
                 n_opp = min(self.arena.max_opponents,
                             len(self.model_vault) - 1)
@@ -820,8 +918,21 @@ class OrcaTrainer:
                 elo_str = f" | ELO {new_elo:.0f} ({sign}{delta:.0f})"
                 stall = (f" stall={_curriculum_stall_iters}"
                          if _curriculum_stall_iters > 0 else "")
-                print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
-                      f"in {t_elo:.1f}s{stall}")
+
+                # Checkpoint gating: only save best model
+                best = self.metrics.get("best_elo", 1000.0)
+                if new_elo > best:
+                    self.metrics["best_elo"] = new_elo
+                    self.metrics["best_iteration"] = iteration + 1
+                    torch.save({"model_state_dict": self.net.state_dict(),
+                                "iteration": iteration + 1, "elo": new_elo},
+                               "hex_best.pt")
+                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
+                          f"NEW BEST (saved hex_best.pt) {stall}")
+                else:
+                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
+                          f"(best: {best:.0f} @ iter {self.metrics.get('best_iteration', '?')}) "
+                          f"{stall}")
 
             # -- Metrics & AutoTuner -----------------------------------------
             avg_len = total_moves / max(game_idx, 1)
@@ -1112,7 +1223,13 @@ class OrcaTrainer:
                         traceback.print_exc()
                         continue
 
-                    for ser, move_hist, result_val, n_samp in batch_results:
+                    for item in batch_results:
+                        # Support both old 4-tuple and new 5-tuple format
+                        if len(item) >= 5:
+                            ser, move_hist, result_val, n_samp, ana_data = item[:5]
+                        else:
+                            ser, move_hist, result_val, n_samp = item[:4]
+                            ana_data = None
                         for sd in ser:
                             sample = TrainingSample(
                                 encoded_state=torch.from_numpy(sd["state"]),
@@ -1135,7 +1252,8 @@ class OrcaTrainer:
                         game_idx += 1
                         self.observer.on_game_complete(
                             game_idx, current_games, move_hist,
-                            result_val, n_samp)
+                            result_val, n_samp,
+                            analysis_data=ana_data)
         else:
             print(f"  |  Self-play: V1 (ONNX Runtime)...")
             with ProcessPoolExecutor(max_workers=self.num_workers) as pool:
@@ -1156,7 +1274,12 @@ class OrcaTrainer:
                         traceback.print_exc()
                         continue
 
-                    for ser, move_hist, result_val, n_samp in batch_results:
+                    for item in batch_results:
+                        if len(item) >= 5:
+                            ser, move_hist, result_val, n_samp, ana_data = item[:5]
+                        else:
+                            ser, move_hist, result_val, n_samp = item[:4]
+                            ana_data = None
                         for sd in ser:
                             sample = TrainingSample(
                                 encoded_state=torch.from_numpy(sd["state"]),
@@ -1179,7 +1302,8 @@ class OrcaTrainer:
                         game_idx += 1
                         self.observer.on_game_complete(
                             game_idx, current_games, move_hist,
-                            result_val, n_samp)
+                            result_val, n_samp,
+                            analysis_data=ana_data)
 
         if worker_errors > 0:
             print(f"  |  {worker_errors} worker(s) failed")
@@ -1329,8 +1453,18 @@ All parameters default to values in orca/config.py. CLI args override config.
                    help="Disable cosine annealing LR (use fixed LR)")
     g.add_argument("--no-augmentation", action="store_true",
                    help="Disable symmetry data augmentation")
+    g.add_argument("--no-ab-hybrid", action="store_true",
+                   help="Disable AB pre-check in MCTS (let MCTS handle wins/blocks)")
 
     args = parser.parse_args()
+
+    # Apply AB hybrid toggle to config at runtime
+    if args.no_ab_hybrid:
+        try:
+            import orca.config
+            orca.config.USE_AB_HYBRID = False
+        except Exception:
+            pass
 
     trainer = OrcaTrainer(
         iterations=args.iterations,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hexbot"
-version = "4.0.0"
+version = "4.1.0"
 description = "Python framework for building AI bots for Hexagonal Connect-6"
 readme = "README.md"
 # license in classifiers below

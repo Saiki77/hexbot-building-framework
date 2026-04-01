@@ -686,26 +686,50 @@ def load_online_games(path: str = "online_games.jsonl",
 # Symmetry augmentation
 # ---------------------------------------------------------------------------
 
+def _axial_rotate(state, policy, rotate_fn):
+    """Rotate state and policy via axial coordinate transform.
+
+    rotate_fn: (q, r) -> (q', r') in axial coords centered at (0, 0).
+    """
+    N = BOARD_SIZE
+    C = N // 2  # center offset
+    s_new = np.zeros_like(state)
+    p_new = np.zeros_like(policy)
+
+    for i in range(N):
+        for j in range(N):
+            # Grid (i,j) -> axial (q,r) centered at (C,C)
+            q, r = i - C, j - C
+            q2, r2 = rotate_fn(q, r)
+            i2, j2 = q2 + C, r2 + C
+            if 0 <= i2 < N and 0 <= j2 < N:
+                s_new[:, i2, j2] = state[:, i, j]
+                p_new[i2, j2] = policy[i, j]
+    return s_new, p_new
+
+
 def augment_sample(sample: TrainingSample) -> List[TrainingSample]:
-    """Apply valid hex-on-grid symmetry augmentations.
-    Returns 3 new samples: 180 rotation, transpose, transpose+180."""
+    """Apply hex symmetry augmentations.
+
+    Returns up to 7 new samples:
+    - 3 grid-safe transforms: 180 rotation, transpose, transpose+180 (0.8x priority)
+    - 4 axial rotations: 60, 120, 240, 300 degrees via re-encoding (0.7x priority)
+    """
     state = sample.encoded_state.numpy()  # (C, N, N)
     policy = sample.policy_target.reshape(BOARD_SIZE, BOARD_SIZE)
     aug = []
 
-    transforms = [
-        # 180 rotation: (i,j) -> (N-1-i, N-1-j)
+    # Grid-safe transforms (fast, numpy array ops)
+    grid_transforms = [
         (lambda s: s[:, ::-1, ::-1].copy(),
          lambda p: p[::-1, ::-1].copy()),
-        # Transpose: (i,j) -> (j,i)
         (lambda s: s.transpose(0, 2, 1).copy(),
          lambda p: p.T.copy()),
-        # Transpose + 180: (i,j) -> (N-1-j, N-1-i)
         (lambda s: s[:, ::-1, ::-1].transpose(0, 2, 1).copy(),
          lambda p: p[::-1, ::-1].T.copy()),
     ]
 
-    for s_fn, p_fn in transforms:
+    for s_fn, p_fn in grid_transforms:
         s_new = s_fn(state)
         p_new = p_fn(policy).flatten()
         ps = p_new.sum()
@@ -718,6 +742,32 @@ def augment_sample(sample: TrainingSample) -> List[TrainingSample]:
             result=sample.result,
             threat_label=sample.threat_label,
             priority=sample.priority * 0.8,
+        ))
+
+    # Axial hex rotations (slower, coordinate re-encoding)
+    # 60: (q,r) -> (-r, q+r)    120: (q,r) -> (-q-r, q)
+    # 240: (q,r) -> (r, -q-r)   300: (q,r) -> (q+r, -q)
+    axial_rotations = [
+        lambda q, r: (-r, q + r),       # 60 deg
+        lambda q, r: (-q - r, q),        # 120 deg
+        lambda q, r: (r, -q - r),        # 240 deg
+        lambda q, r: (q + r, -q),        # 300 deg
+    ]
+
+    for rot_fn in axial_rotations:
+        s_new, p_new_2d = _axial_rotate(state, policy, rot_fn)
+        p_new = p_new_2d.flatten()
+        ps = p_new.sum()
+        if ps <= 0:
+            continue  # all mass fell off grid, skip this rotation
+        p_new = p_new / ps
+        aug.append(TrainingSample(
+            encoded_state=torch.from_numpy(np.ascontiguousarray(s_new)),
+            policy_target=np.ascontiguousarray(p_new),
+            player=sample.player,
+            result=sample.result,
+            threat_label=sample.threat_label,
+            priority=sample.priority * 0.7,
         ))
 
     return aug
@@ -822,8 +872,12 @@ def self_play_game_v2(
     hint_moves: Optional[List[Tuple[int, int]]] = None,
     use_c_engine: bool = True,
     move_callback=None,
-) -> Tuple[List[TrainingSample], List[Tuple[int, int]]]:
-    """Fast self-play using C engine + batched MCTS."""
+) -> Tuple[List[TrainingSample], List[Tuple[int, int]], List[dict]]:
+    """Fast self-play using C engine + batched MCTS.
+
+    Returns (samples, move_history, analysis_data) where analysis_data is a
+    list of per-move dicts with keys: value_estimate, top_moves, threat_count.
+    """
     if use_c_engine:
         game = CGameState(max_total_stones=200)
         enc_fn = c_encode_state
@@ -853,8 +907,10 @@ def self_play_game_v2(
 
     samples: List[TrainingSample] = []
     move_history: List[Tuple[int, int]] = []
+    analysis_data: List[dict] = []
     move_count = 0
     consecutive_bad = 0  # resign threshold counter
+    prev_opp_threats = 0  # for blocking detection
 
     while not game.is_terminal:
         temperature = 1.0 if move_count < temp_threshold else 0.01
@@ -920,6 +976,28 @@ def self_play_game_v2(
             threat_label=threat,
         ))
 
+        # --- Per-move analysis for KaTrain-style dashboard overlay ---
+        move_analysis = {'value_estimate': 0.0, 'top_moves': [], 'threat_count': 0}
+        try:
+            if hasattr(mcts, 'last_root_value'):
+                move_analysis['value_estimate'] = float(mcts.last_root_value)
+            if hasattr(mcts, 'last_top_moves'):
+                move_analysis['top_moves'] = [
+                    (int(q), int(r), round(float(p), 4))
+                    for q, r, p in mcts.last_top_moves(5)
+                ]
+            # Count winning cells for current player
+            if hasattr(game, '_ptr') and hasattr(game, '_lib'):
+                move_analysis['threat_count'] = int(
+                    game._lib.board_count_winning_moves(game._ptr, game.current_player))
+            else:
+                move_analysis['threat_count'] = sum(
+                    1 for m in game.legal_moves()
+                    if _line_through_candidate(game, m[0], m[1], game.current_player) >= 6)
+        except Exception:
+            pass
+        analysis_data.append(move_analysis)
+
         moves_list = list(policy.keys())
         probs = np.array([policy[m] for m in moves_list], dtype=np.float64)
         probs /= probs.sum()
@@ -950,7 +1028,25 @@ def self_play_game_v2(
                 elif threats >= 2:
                     samples[-1].priority = max(samples[-1].priority, 3.5)
             except Exception:
-                pass  # don't crash training on threat counting
+                pass
+
+        # Blocking detection: reward moves that survive opponent threats
+        if samples and move_count > 2:
+            try:
+                opp = 1 - prev_player
+                if hasattr(game, '_ptr'):
+                    opp_threats_now = game._lib.board_count_winning_moves(game._ptr, opp)
+                else:
+                    opp_threats_now = 0
+                if prev_opp_threats > 0 and opp_threats_now < prev_opp_threats:
+                    # Successfully blocked opponent threat
+                    samples[-1].priority = max(samples[-1].priority, 3.0)
+                elif prev_opp_threats > 0 and opp_threats_now >= prev_opp_threats:
+                    # Survived but didn't reduce threats - still valuable
+                    samples[-1].priority = max(samples[-1].priority, 2.0)
+                prev_opp_threats = opp_threats_now
+            except Exception:
+                pass
 
     n = len(samples)
     for i, sample in enumerate(samples):
@@ -960,10 +1056,25 @@ def self_play_game_v2(
         elif i >= n - 15:
             sample.priority = 2.0
 
-    # Penalize short games
-    if n < 30:
+    # Progressive short-game penalty / long-game bonus
+    if n < 10:
+        return [], move_history, analysis_data  # discard junk games
+    elif n < 20:
         for sample in samples:
-            sample.priority *= 0.5
+            sample.priority *= 0.2
+    elif n < 30:
+        for sample in samples:
+            sample.priority *= 0.4
+    elif n < 40:
+        for sample in samples:
+            sample.priority *= 0.7
+    # Long game bonus
+    if n >= 60:
+        for sample in samples:
+            sample.priority *= 1.8
+    elif n >= 45:
+        for sample in samples:
+            sample.priority *= 1.3
 
     # --- DIVERSITY BONUS ---
     if PLAY_STYLE == 'distant' and game.total_stones > 10:
@@ -976,7 +1087,7 @@ def self_play_game_v2(
                 for sample in samples:
                     sample.priority *= 1.5
 
-    return samples, move_history
+    return samples, move_history, analysis_data
 
 
 # ---------------------------------------------------------------------------
@@ -1012,7 +1123,9 @@ def train_step(
         values[i] = s.result
         threats[i] = s.threat_label if s.threat_label is not None else _ZERO_THREAT
 
-    # Single transfer to device
+    # Pin memory for faster CUDA transfer
+    if device.type == 'cuda':
+        states = states.pin_memory()
     states = states.to(device, non_blocking=True)
     target_policies = torch.from_numpy(policies).to(device, non_blocking=True)
     target_values = torch.from_numpy(values).to(device, non_blocking=True)
@@ -1036,10 +1149,13 @@ def train_step(
     optimizer.zero_grad(set_to_none=True)
     if use_amp:
         grad_scaler.scale(loss).backward()
+        grad_scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         grad_scaler.step(optimizer)
         grad_scaler.update()
     else:
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         optimizer.step()
 
     # TD-error priority updates

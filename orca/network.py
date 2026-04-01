@@ -470,6 +470,12 @@ def create_network(config: str = 'standard', board_size: int = BOARD_SIZE) -> nn
     elif config == 'hex-masked':
         from orca.hex_conv import HexMaskedNet
         return HexMaskedNet(board_size=board_size)
+    elif config == 'hex-native':
+        from orca.hex_conv import HexNativeNet
+        return HexNativeNet(board_size=board_size, circular_padding=False)
+    elif config == 'hex-native-circular':
+        from orca.hex_conv import HexNativeNet
+        return HexNativeNet(board_size=board_size, circular_padding=True)
     elif config == 'hex-gnn':
         from orca.hex_gnn import HexGNN
         return HexGNN(board_size=board_size)
@@ -478,8 +484,8 @@ def create_network(config: str = 'standard', board_size: int = BOARD_SIZE) -> nn
         return MultiScaleHexNet(board_size=board_size)
     else:
         raise ValueError(f"Unknown network config: {config}. "
-                         f"Available: fast, standard, large, hybrid, hybrid-small, "
-                         f"orca-transformer, hex-gnn, multiscale")
+                         f"Available: fast, standard, large, hex-masked, hex-native, "
+                         f"hex-native-circular, orca-transformer, hex-gnn, multiscale")
 
 
 # ---------------------------------------------------------------------------

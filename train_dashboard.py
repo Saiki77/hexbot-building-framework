@@ -241,8 +241,8 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
                 pos, hints = entry
             elif isinstance(entry, dict):
                 pos = entry
-        samples, move_history = self_play_game_v2(net, searcher, start_position=pos,
-                                                   hint_moves=hints)
+        samples, move_history, _analysis = self_play_game_v2(net, searcher, start_position=pos,
+                                                              hint_moves=hints)
         t_game = _time.perf_counter() - t_game
         winner = 'P0' if (samples and samples[0].result > 0) else 'P1'
         print(f'  │  [W{pid}] game {i+1}/{games}: {winner} {len(move_history)}mv {t_game:.1f}s ({t_game/max(len(move_history),1):.2f}s/mv)')
@@ -581,7 +581,8 @@ class DashboardObserver:
 
     def on_game_complete(self, game_idx: int, total_games: int,
                          move_history: list, result: float,
-                         num_samples: int) -> None:
+                         num_samples: int,
+                         analysis_data: list = None) -> None:
         data = {
             'game_idx': game_idx,
             'total_games': total_games,
@@ -589,6 +590,8 @@ class DashboardObserver:
             'num_moves': len(move_history),
             'moves': move_history,
         }
+        if analysis_data:
+            data['analysis'] = analysis_data
         print(f'  │   Emitting game_complete #{game_idx} with {len(move_history)} moves')
         self.sio.emit('game_complete', data)
 

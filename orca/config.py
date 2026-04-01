@@ -52,6 +52,7 @@ ELO_EVAL_EVERY = 2            # ELO evaluation frequency (iterations)
 ELO_EVAL_GAMES = 4            # games per ELO opponent
 ELO_EVAL_SIMS = 30            # MCTS sims during ELO games (lower = faster eval)
 ELO_MAX_OPPONENTS = 6         # max past versions to play against
+ELO_BASELINE_GAMES = 4        # games vs random + heuristic baselines (0 = disable)
 
 # ---------------------------------------------------------------------------
 # Model vault
@@ -78,6 +79,14 @@ PLATEAU_SIM_BOOST = 50   # extra sims on plateau (capped at 400)
 COSINE_T0 = 50
 COSINE_T_MULT = 2
 COSINE_ETA_MIN = 1e-4
+
+# ---------------------------------------------------------------------------
+# Defensive training (blocking reward)
+# ---------------------------------------------------------------------------
+BLOCKING_PRIORITY_BOOST = 3.0    # priority for moves that block opponent threats
+SURVIVAL_PRIORITY_BOOST = 2.0    # priority for surviving an opponent threat turn
+USE_AB_HYBRID = True             # set False to disable AB pre-check in MCTS
+AB_HYBRID_DEPTH = 4              # depth of AB pre-check (0 = disable)
 
 # ---------------------------------------------------------------------------
 # Mixed precision (CUDA only - MPS FP16 is unreliable)
