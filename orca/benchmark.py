@@ -269,8 +269,8 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
     from bot import get_device
 
     device = get_device()
-    if device.type != 'cuda':
-        return {'skipped': True, 'reason': f'Not CUDA (device={device})'}
+    if device.type == 'cpu':
+        return {'skipped': True, 'reason': 'CPU only (no GPU)'}
 
     from orca.gpu_server import GPUInferenceServer
     from orca.search import BatchedMCTS
@@ -550,10 +550,11 @@ def print_report(results: Dict, device_info: Dict):
     if 'gpu_selfplay' in results:
         gsp = results['gpu_selfplay']
         if gsp.get('skipped'):
-            print(f"|  GPU SELF-PLAY: skipped ({gsp.get('reason', 'not CUDA')})".ljust(W - 1) + "|")
+            print(f"|  GPU SELF-PLAY: skipped ({gsp.get('reason', 'no GPU')})".ljust(W - 1) + "|")
         else:
             ckpt = "checkpoint" if gsp.get('checkpoint_loaded') else "random weights"
-            print(f"|  GPU SELF-PLAY (50 sims, threaded, {ckpt})".ljust(W - 1) + "|")
+            dev = results.get('nn', {}).get('device', '?')
+            print(f"|  GPU SELF-PLAY (50 sims, threaded, {dev}, {ckpt})".ljust(W - 1) + "|")
             print(f"|    {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} moves  {gsp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
             print(f"|    GPU: {gsp.get('gpu_evals', 0)} evals, avg batch={gsp.get('avg_batch_size', 0):.1f}".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
