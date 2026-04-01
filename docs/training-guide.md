@@ -445,6 +445,108 @@ python -m orca.train --skill-curriculum --start-level 0
 
 ---
 
+## Blocking Reward (v4.1)
+
+Defensive moves now receive priority boosts during sample collection. Previously
+only offensive moves (forks, multi-threats) got boosted priority.
+
+| Move Type | Priority Boost | Description |
+|-----------|---------------|-------------|
+| Blocks opponent threat | 3.0x (`BLOCKING_PRIORITY_BOOST`) | Move successfully prevents an opponent 4+ in-a-row |
+| Survives a threat | 2.0x (`SURVIVAL_PRIORITY_BOOST`) | Player survives after opponent had a winning threat |
+| Fork (2+ threats) | 3.5x | Unchanged from v4.0 |
+
+This produces more balanced training data where the network learns both attack
+and defense equally well.
+
+---
+
+## Progressive Game Length Penalties (v4.1)
+
+Short games are penalized with a tiered priority system instead of the flat 0.5x
+penalty from v4.0. Long games get bonus priority.
+
+| Game Length | Multiplier | Notes |
+|-------------|-----------|-------|
+| < 10 moves | discarded | Not added to replay buffer at all |
+| 10-19 | 0.2x | Minimal signal |
+| 20-29 | 0.4x | Some signal |
+| 30-39 | 0.7x | Decent games |
+| 40-44 | 1.0x | No penalty |
+| 45-59 | 1.3x | Long game bonus |
+| 60+ | 1.8x | Deep strategic games rewarded most |
+
+---
+
+## Configurable AB Hybrid (v4.1)
+
+The alpha-beta pre-check at the MCTS root can now be disabled or tuned.
+
+```bash
+python -m orca.train --no-ab-hybrid          # disable AB pre-check entirely
+python -m orca.train --ab-hybrid-depth 6     # deeper AB search (default: 4)
+```
+
+Disabling the hybrid lets MCTS see blocking positions that alpha-beta would
+short-circuit, producing richer training data for defensive play. The trade-off
+is that forced wins within the AB depth may be missed during self-play.
+
+---
+
+## Baseline ELO Matches (v4.1)
+
+ELO evaluation now includes matches against fixed-strength anchors for more
+stable, meaningful ratings.
+
+- **Random bot** anchored at ~500 ELO
+- **Heuristic bot** anchored at ~1000 ELO
+- **Blended ELO** = 60% generational + 20% random-anchored + 20% heuristic-anchored
+
+Configure with `ELO_BASELINE_GAMES` (default 4, set 0 to disable).
+
+---
+
+## Full Hex Augmentation (v4.1)
+
+Data augmentation now produces up to 8x training data per game (up from 4x).
+
+| Transform | Type | Priority |
+|-----------|------|----------|
+| 180-degree rotation | grid-safe | 0.8x |
+| Transpose | grid-safe | 0.8x |
+| Transpose + 180 | grid-safe | 0.8x |
+| 60-degree axial rotation | axial | 0.7x |
+| 120-degree axial rotation | axial | 0.7x |
+| 240-degree axial rotation | axial | 0.7x |
+| 300-degree axial rotation | axial | 0.7x |
+
+Axial rotations use coordinate re-encoding. Rotations where all mass falls
+off-grid are automatically filtered out.
+
+---
+
+## CUDA Optimization (v4.1)
+
+### Mixed Precision (Now Activated)
+
+Mixed precision was implemented in v4.0 but never wired up. It is now active by
+default on CUDA. Uses `GradScaler` with gradient clipping and `pin_memory` for
+faster CPU-to-GPU transfers.
+
+```python
+# config.py defaults
+USE_MIXED_PRECISION = True
+GRAD_CLIP_NORM = 1.0
+```
+
+### torch.compile
+
+Automatically applied on CUDA after checkpoint restore. Reduces kernel overhead
+for ~2x total speedup on NVIDIA GPUs. No configuration needed -- it activates
+when `torch.cuda.is_available()` returns True.
+
+---
+
 ## CLI Reference
 
 ```

@@ -158,6 +158,8 @@ gradients during early training or with large learning rates.
 | `hex-masked` | 3.9M | CNN with hex-neighbor masking on 3x3 filters (recommended) |
 | `hex-gnn` | 432K | Graph Neural Network on hex topology (experimental) |
 | `multiscale` | 1.1M | Local CNN + global attention two-tower (experimental) |
+| `hex-native` | 3.1M | True 7-weight hex convolution kernel, no masking (v4.1) |
+| `hex-native-circular` | 3.1M | hex-native with toroidal padding for cleaner boundaries (v4.1) |
 
 ### hex-gnn Parameters
 
@@ -353,6 +355,58 @@ When ELO stalls, the curriculum can auto-boost MCTS simulations.
 | `PLATEAU_SIM_BOOST` | 50 | `--plateau-boost` | Extra sims added on plateau (capped at 400) |
 
 Disable with `--no-curriculum` (plateau detection is part of the curriculum system).
+
+## Defensive Training (v4.1)
+
+Parameters controlling priority boosts for defensive and blocking moves during
+self-play sample collection.
+
+| Parameter | Default | CLI Flag | Description |
+|-----------|---------|----------|-------------|
+| `BLOCKING_PRIORITY_BOOST` | 3.0 | -- | Priority multiplier for moves that block opponent threats |
+| `SURVIVAL_PRIORITY_BOOST` | 2.0 | -- | Priority multiplier for surviving an opponent threat |
+| `USE_AB_HYBRID` | `True` | `--no-ab-hybrid` | Enable depth-limited alpha-beta pre-check in MCTS root |
+| `AB_HYBRID_DEPTH` | 4 | `--ab-hybrid-depth` | Search depth for the alpha-beta pre-check |
+
+Disabling `USE_AB_HYBRID` lets MCTS explore full game trees including blocking
+positions, producing richer training data at the cost of missing some forced wins.
+
+---
+
+## Short Game Penalties (v4.1)
+
+Progressive priority penalties replace the flat 0.5x short-game penalty.
+
+| Game Length | Priority Multiplier | Rationale |
+|-------------|---------------------|-----------|
+| < 10 moves | **discarded** | Junk / resigned games |
+| 10-19 moves | 0.2x | Minimal strategic content |
+| 20-29 moves | 0.4x | Some mid-game signal |
+| 30-39 moves | 0.7x | Decent games |
+| 40+ moves | 1.0x | Full priority (no penalty) |
+
+---
+
+## Long Game Bonus (v4.1)
+
+Games that reach deep into the mid/late game are upweighted.
+
+| Game Length | Priority Multiplier |
+|-------------|---------------------|
+| 45-59 moves | 1.3x |
+| 60+ moves | 1.8x |
+
+---
+
+## ELO Baseline (v4.1)
+
+| Parameter | Default | CLI Flag | Description |
+|-----------|---------|----------|-------------|
+| `ELO_BASELINE_GAMES` | 4 | `--elo-baseline-games` | Games vs random + heuristic anchors per eval. Set 0 to disable |
+
+Blended ELO = 60% generational + 20% random-anchored (~500) + 20% heuristic-anchored (~1000).
+
+---
 
 ## ELO Arena
 

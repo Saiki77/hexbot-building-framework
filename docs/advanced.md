@@ -368,6 +368,91 @@ count and speed as the standard CNN, but cleaner hex-aware features.
 
 ---
 
+## GPU Inference Server (v4.1)
+
+The `orca/gpu_server.py` module provides centralized batched inference for
+self-play workers. Workers play games on CPU (C engine) and send positions to
+the GPU server for neural network evaluation, eliminating per-worker model loading.
+
+```python
+from orca.gpu_server import GPUInferenceServer
+
+server = GPUInferenceServer(net, device='cuda', batch_size=64)
+server.start()
+
+# Workers submit positions, server batches and returns evaluations
+policy, value = server.evaluate(encoded_state)
+
+server.stop()
+```
+
+The server accumulates requests and processes them in batches for maximum GPU
+throughput. This is especially beneficial when running many self-play workers.
+
+---
+
+## Mixed Precision Training -- Now Activated (v4.1)
+
+Mixed precision was implemented in v4.0 but never wired up. In v4.1 it is
+active by default on CUDA (`USE_MIXED_PRECISION = True`). Key changes:
+
+- `GradScaler` with fp16 forward passes and fp32 gradient accumulation
+- Gradient clipping (`GRAD_CLIP_NORM = 1.0`) prevents exploding gradients
+- `pin_memory=True` on DataLoaders for faster CPU-to-GPU transfers
+- ~2x training speedup on NVIDIA GPUs with Tensor Cores
+
+---
+
+## torch.compile Support (v4.1)
+
+After checkpoint restore on CUDA, `torch.compile` is automatically applied to
+the network. This reduces Python overhead and fuses GPU kernels for lower
+latency per forward/backward pass.
+
+```python
+# Applied automatically -- no user configuration needed
+if torch.cuda.is_available():
+    net = torch.compile(net)
+```
+
+Combined with mixed precision, total CUDA training speedup is approximately 2x.
+
+---
+
+## Axial Hex Rotations (v4.1)
+
+Four new augmentation transforms rotate the hex board by 60, 120, 240, and 300
+degrees using axial coordinate re-encoding. Combined with the existing 3
+grid-safe transforms, this yields 7 transforms (8x data) per game.
+
+| Rotation | Axial Transform (q, r) |
+|----------|----------------------|
+| 60 deg | `(-r, q+r)` |
+| 120 deg | `(-q-r, q)` |
+| 240 deg | `(r, -q-r)` |
+| 300 deg | `(q+r, -q)` |
+
+Axial rotations get 0.7x priority (grid-safe get 0.8x). Rotations where all
+stone positions fall outside the 19x19 grid are automatically discarded.
+
+---
+
+## Configurable AB Hybrid Depth (v4.1)
+
+The alpha-beta pre-check depth in `BatchedMCTS` is now configurable:
+
+```python
+# config.py
+USE_AB_HYBRID = True    # set False or --no-ab-hybrid to disable
+AB_HYBRID_DEPTH = 4     # default depth, increase for stronger tactical play
+```
+
+Deeper AB search catches more forced wins but takes longer per MCTS root
+evaluation. Disabling the hybrid entirely lets MCTS explore blocking positions,
+producing richer defensive training data.
+
+---
+
 ## Running Tests
 
 ```bash

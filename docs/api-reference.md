@@ -356,7 +356,8 @@ One gradient step. Returns `{'total', 'value', 'policy', 'threat'}` losses.
 ```python
 augment_sample(sample) -> List[TrainingSample]
 ```
-Hex-valid symmetry augmentation. Returns 3 augmented copies.
+Hex-valid symmetry augmentation. Returns up to 7 augmented copies (v4.1: 3
+grid-safe + 4 axial rotations). Axial rotations that fall off-grid are filtered.
 
 ```python
 TrainingSample  # dataclass: encoded_state, policy_target, result, threat_label, priority
@@ -560,6 +561,33 @@ Register a custom network architecture for `create_network(name)`.
 ```python
 register_bot('my-bot', MyBot)
 register_network('my-net', lambda: MyNetwork())
+```
+
+---
+
+## GPU Inference Server (v4.1)
+
+```python
+from orca.gpu_server import GPUInferenceServer
+```
+
+### GPUInferenceServer(net, device='cuda', batch_size=64)
+
+Centralized batched inference server for self-play workers. Workers play on CPU
+and send positions to the GPU for NN evaluation.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `server.start()` | `None` | Start the inference server |
+| `server.stop()` | `None` | Stop the server and release GPU memory |
+| `server.evaluate(state)` | `(policy, value)` | Submit a position for evaluation |
+| `server.evaluate_batch(states)` | `List[(policy, value)]` | Batch evaluate multiple positions |
+
+```python
+server = GPUInferenceServer(net, device='cuda', batch_size=64)
+server.start()
+policy, value = server.evaluate(encoded_state)
+server.stop()
 ```
 
 ---

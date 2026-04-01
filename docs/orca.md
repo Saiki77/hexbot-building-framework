@@ -328,6 +328,49 @@ The mask is applied during every forward pass so gradients never flow through
 non-neighbor positions. Same speed and parameter count as standard HexNet but
 the network can only learn hex-valid patterns.
 
+### HexNativeNet (`hex-native`) -- v4.1
+
+A true hex convolution kernel with 7 learnable weights (one per hex neighbor
+plus center). Unlike `hex-masked` which zeros out corners of a 3x3 kernel,
+`hex-native` uses a custom kernel that only has weights for actual hex neighbors.
+
+```python
+net = create_network('hex-native')  # ~3.1M params
+```
+
+| Property | Value |
+|----------|-------|
+| Parameters | ~3.1M |
+| Kernel | 7 weights (6 neighbors + center) |
+| Advantage | No wasted parameters on non-neighbor positions |
+
+### HexNativeCircularNet (`hex-native-circular`) -- v4.1
+
+Same as `hex-native` but with toroidal (circular) padding. Edges wrap around
+so boundary cells see neighbors from the opposite side, eliminating edge effects.
+
+```python
+net = create_network('hex-native-circular')  # ~3.1M params
+```
+
+| Property | Value |
+|----------|-------|
+| Parameters | ~3.1M |
+| Padding | Toroidal (wraps around board edges) |
+| Advantage | Cleaner boundary handling, no edge artifacts |
+
+### Architecture Comparison (v4.1)
+
+| Config | Params | Hex-Aware | Speed | Notes |
+|--------|--------|-----------|-------|-------|
+| `standard` | 3.9M | No | Baseline | Square 3x3 CNN |
+| `hex-masked` | 3.9M | Masking | Same | Zeros non-neighbor kernel positions |
+| `hex-native` | 3.1M | Native | Same | True 7-weight hex kernel |
+| `hex-native-circular` | 3.1M | Native | Same | + toroidal padding |
+| `hex-gnn` | 3.2M | Graph | ~2x slower | Message-passing on hex graph |
+| `multiscale` | 6.1M | No | ~1.5x slower | Multi-scale parallel branches |
+| `orca-transformer` | 5.2M | No | ~1.3x slower | CNN + global attention |
+
 All architectures share the same policy/value/threat head interface as HexNet
 and are drop-in replacements via `--config hex-masked`, `--config hex-gnn`, etc.
 

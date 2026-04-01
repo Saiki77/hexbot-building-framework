@@ -208,6 +208,39 @@ The right panel has 6 collapsible chart panels. Click any header to collapse or 
 
 ---
 
+## KaTrain-Style Analysis View (v4.1)
+
+The dashboard now includes analysis overlays inspired by KaTrain, showing move
+quality and threats directly on the board during game replay.
+
+### Keyboard Toggles
+
+| Key | Overlay | Description |
+|-----|---------|-------------|
+| `V` | Value / quality | Color each move by quality: green = good, red = blunder (value drop > 0.2) |
+| `T` | Threats | Highlight cells with 4+ in-a-row threats |
+
+### Move Quality Coloring
+
+When the V overlay is active, each stone is tinted based on the value head's
+assessment of the move:
+
+- **Green** -- move maintained or improved the position
+- **Red** -- blunder, value dropped by more than 0.2
+- **Circle size** -- proportional to MCTS visit count (top moves overlay)
+
+### Win Rate Chart
+
+A line chart below the board tracks the value head output per move, showing
+momentum swings throughout the game. Hover over the chart to jump to that move.
+
+### Best ELO Badge
+
+The dashboard footer now displays `Best: XXXX @ iter N`, tracking the highest
+ELO achieved across all training iterations. Stored in the `DataStore`.
+
+---
+
 ## Next Steps
 
 - [Getting Started](getting-started.md) -- learn the HexGame API
