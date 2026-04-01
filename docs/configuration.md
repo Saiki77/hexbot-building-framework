@@ -38,7 +38,7 @@ The `--config` / `net_config` parameter selects a preset architecture:
 | `standard` | Default 128-filter, 12-block HexNet (3.9M params) |
 | `large` | Larger network with more filters |
 | `hybrid` | Hybrid architecture |
-| `orca-transformer` | Experimental transformer variant (~5.2M params) |
+| `orca-transformer` | Experimental transformer variant (~4.4M params) |
 
 ---
 
@@ -195,7 +195,7 @@ These parameters only apply when using `--config orca-transformer`:
 | `TRANSFORMER_DROPOUT` | 0.1 | Dropout rate in transformer layers |
 
 The transformer adds global self-attention after the CNN backbone, producing a
-~5.2M parameter model that trains ~30% slower per step.
+~4.4M parameter model that trains ~30% slower per step.
 
 ---
 

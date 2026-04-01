@@ -230,7 +230,7 @@ Input (7, 19, 19)
 
 | Property | HexNet | TransformerHexNet |
 |----------|--------|-------------------|
-| Parameters | ~3.9M | ~5.2M |
+| Parameters | ~3.9M | ~4.4M |
 | Receptive field | Local (3x3 convolutions) | Global (full attention) |
 | Speed | Baseline | ~30% slower per step |
 | Distant reasoning | Limited by conv depth | Attends to all positions |
@@ -252,7 +252,7 @@ layers let the network attend to ALL 361 positions simultaneously, which matters
 from bot import create_network
 
 net = create_network('orca-transformer')
-print(sum(p.numel() for p in net.parameters()))  # ~5.2M
+print(sum(p.numel() for p in net.parameters()))  # ~4.4M
 ```
 
 ```bash
@@ -274,12 +274,12 @@ adjacency. Each cell is a node; edges connect hex neighbors (6-connected).
 ```python
 from orca.hex_gnn import HexGNN
 
-net = create_network('hex-gnn')  # ~3.2M params
+net = create_network('hex-gnn')  # ~432K params
 ```
 
 | Property | Value |
 |----------|-------|
-| Parameters | ~3.2M |
+| Parameters | ~432K |
 | Layers | 8 message-passing |
 | Receptive field | Global (after 8 hops) |
 | Advantage | Native hex topology, no grid artifacts |
@@ -292,12 +292,12 @@ simultaneously, then merge features before the residual tower.
 ```python
 from orca.multiscale_net import MultiscaleNet
 
-net = create_network('multiscale')  # ~6.1M params
+net = create_network('multiscale')  # ~1.1M params
 ```
 
 | Property | Value |
 |----------|-------|
-| Parameters | ~6.1M |
+| Parameters | ~1.1M |
 | Branches | 3x3 + 5x5 + 7x7 parallel convolutions |
 | Advantage | Captures both local tactics and broad structure |
 
@@ -367,9 +367,9 @@ net = create_network('hex-native-circular')  # ~3.1M params
 | `hex-masked` | 3.9M | Masking | Same | Zeros non-neighbor kernel positions |
 | `hex-native` | 3.1M | Native | Same | True 7-weight hex kernel |
 | `hex-native-circular` | 3.1M | Native | Same | + toroidal padding |
-| `hex-gnn` | 3.2M | Graph | ~2x slower | Message-passing on hex graph |
-| `multiscale` | 6.1M | No | ~1.5x slower | Multi-scale parallel branches |
-| `orca-transformer` | 5.2M | No | ~1.3x slower | CNN + global attention |
+| `hex-gnn` | 432K | Graph | ~2x slower | Message-passing on hex graph |
+| `multiscale` | 1.1M | No | ~1.5x slower | Local CNN + global attention |
+| `orca-transformer` | 4.4M | No | ~1.3x slower | CNN + global attention |
 
 All architectures share the same policy/value/threat head interface as HexNet
 and are drop-in replacements via `--config hex-masked`, `--config hex-gnn`, etc.

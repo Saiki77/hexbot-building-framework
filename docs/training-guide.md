@@ -241,21 +241,24 @@ samples are evicted (FIFO via `collections.deque`).
 
 ## Data Augmentation
 
-### Hex-Valid Symmetries
+### Hex Symmetries (v4.1: 7 transforms, 8x data)
 
-The `augment_sample()` function generates 3 additional samples per original using
-symmetries that are valid on the 19x19 hex grid:
+The `augment_sample()` function generates up to 7 additional samples per original:
 
-1. **180-degree rotation**: `rot180(state)` -- flip both axes
-2. **Transpose**: `state.transpose(1, 2)` -- swap q and r axes
-3. **Transpose + 180-degree rotation**: combine both transforms
+**Grid-safe transforms (fast, numpy array ops, 0.8x priority):**
+1. **180-degree rotation**: flip both axes
+2. **Transpose**: swap q and r axes
+3. **Transpose + 180**: combine both
 
-These are the only valid augmentations for a hex grid mapped to a square tensor.
-Single-axis flips and 90-degree rotations break the hex topology and produce
-invalid board states.
+**Axial hex rotations (coordinate re-encoding, 0.7x priority):**
+4. **60-degree**: (q,r) -> (-r, q+r)
+5. **120-degree**: (q,r) -> (-q-r, q)
+6. **240-degree**: (q,r) -> (r, -q-r)
+7. **300-degree**: (q,r) -> (q+r, -q)
 
-Policy targets are remapped to match the transformed board coordinates.
-Augmented samples receive 80% of the original's priority.
+Axial rotations where all positions fall outside the 19x19 grid are
+automatically filtered out. Policy targets are remapped to match the
+transformed board coordinates.
 
 ---
 
