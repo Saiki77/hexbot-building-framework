@@ -269,8 +269,8 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
     from bot import get_device
 
     device = get_device()
-    if device.type == 'cpu':
-        return {'skipped': True, 'reason': 'CPU only (no GPU)'}
+    if device.type != 'cuda':
+        return {'skipped': True, 'reason': f'CUDA only (device={device}, MPS has GIL issues)'}
 
     from orca.search import BatchedMCTS
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -713,33 +713,37 @@ Examples:
         print(f"  [{section}]...", end=' ', flush=True)
         t0 = time.perf_counter()
 
-        if section == 'engine':
-            results['engine'] = bench_engine()
-        elif section == 'nn':
-            configs = ['fast', 'standard'] if args.quick else None
-            results['nn'] = bench_nn(configs)
-        elif section == 'latency':
-            results['latency'] = bench_latency()
-        elif section == 'search':
-            results['search'] = bench_search()
-        elif section == 'selfplay':
-            n = 3 if args.quick else 10
-            results['selfplay'] = bench_selfplay(n)
-        elif section == 'gpu_selfplay':
-            n = 3 if args.quick else 10
-            results['gpu_selfplay'] = bench_gpu_selfplay(n)
-        elif section == 'cpu_selfplay':
-            n = 3 if args.quick else 5
-            results['cpu_selfplay'] = bench_cpu_selfplay(n)
-        elif section == 'training':
-            n = 5 if args.quick else 20
-            results['training'] = bench_training(n)
-        elif section == 'augmentation':
-            results['augmentation'] = bench_augmentation()
-        elif section == 'replay':
-            results['replay'] = bench_replay()
+        try:
+            if section == 'engine':
+                results['engine'] = bench_engine()
+            elif section == 'nn':
+                configs = ['fast', 'standard'] if args.quick else None
+                results['nn'] = bench_nn(configs)
+            elif section == 'latency':
+                results['latency'] = bench_latency()
+            elif section == 'search':
+                results['search'] = bench_search()
+            elif section == 'selfplay':
+                n = 3 if args.quick else 10
+                results['selfplay'] = bench_selfplay(n)
+            elif section == 'gpu_selfplay':
+                n = 3 if args.quick else 10
+                results['gpu_selfplay'] = bench_gpu_selfplay(n)
+            elif section == 'cpu_selfplay':
+                n = 3 if args.quick else 5
+                results['cpu_selfplay'] = bench_cpu_selfplay(n)
+            elif section == 'training':
+                n = 5 if args.quick else 20
+                results['training'] = bench_training(n)
+            elif section == 'augmentation':
+                results['augmentation'] = bench_augmentation()
+            elif section == 'replay':
+                results['replay'] = bench_replay()
 
-        print(f"{time.perf_counter() - t0:.1f}s")
+            print(f"{time.perf_counter() - t0:.1f}s")
+        except Exception as e:
+            print(f"ERROR: {e}")
+            results[section] = {'skipped': True, 'reason': str(e)}
 
     print_report(results, device_info)
 
