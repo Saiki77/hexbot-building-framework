@@ -910,8 +910,58 @@ class TrainingManager:
 
             t_selfplay_start = time.perf_counter()
 
-            if use_v2:
-                # V2: ProcessPool with C engine + PyTorch
+            if use_v2 and self.device.type == 'cuda':
+                # CUDA threaded: shared GPU network, no process spawn overhead
+                from concurrent.futures import ThreadPoolExecutor
+                from bot import self_play_game_v2 as _spv2, BatchedMCTS as _BMCTS
+                import io as _io, contextlib as _cl
+
+                print(f'  |  Self-play: CUDA threaded ({num_workers} threads, '
+                      f'{current_sims} sims)...')
+                self.net.eval()
+                _mcts = _BMCTS(self.net, num_simulations=current_sims, batch_size=64)
+                _lock = threading.Lock()
+
+                def _play_game(gi):
+                    pos = flat_pos[gi] if gi < len(flat_pos) else None
+                    with _cl.redirect_stdout(_io.StringIO()):
+                        samples, moves, *rest = _spv2(self.net, _mcts, start_position=pos)
+                    ana = rest[0] if rest else None
+                    rv = samples[0].result if samples else 0.0
+                    return samples, moves, rv, ana
+
+                flat_pos = []
+                for c, pos in zip(chunks, chunk_positions):
+                    for gi in range(c):
+                        flat_pos.append(pos[gi] if pos and gi < len(pos) else None)
+
+                with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                    futs = {pool.submit(_play_game, i): i for i in range(current_games)}
+                    for future in as_completed(futs):
+                        if self.observer.should_stop():
+                            break
+                        try:
+                            samples, move_hist, result_val, ana_data = future.result()
+                        except Exception as e:
+                            worker_errors += 1
+                            print(f'  |  Thread error: {e}')
+                            continue
+                        for s in samples:
+                            replay_buffer.push(s)
+                            collected_samples.append(s)
+                        total_samples += len(samples)
+                        total_moves += len(move_hist)
+                        if result_val > 0: wins[0] += 1
+                        elif result_val < 0: wins[1] += 1
+                        else: wins[2] += 1
+                        game_idx += 1
+                        self.observer.on_game_complete(
+                            game_idx, current_games,
+                            [list(m) for m in move_hist],
+                            result_val, len(samples))
+
+            elif use_v2:
+                # MPS/CPU: ProcessPool with C engine + PyTorch
                 net_state = {k: v.cpu() for k, v in self.net.state_dict().items()}
 
                 # Asymmetric self-play: 25% of workers use an older checkpoint as opponent
