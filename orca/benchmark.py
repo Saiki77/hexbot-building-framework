@@ -635,6 +635,27 @@ def print_report(results: Dict, device_info: Dict):
         print(f"|    push: {r['push_us_per_sample']:.1f}us/sample  sample(512): {r['sample_us_per_batch']:.0f}us/batch".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
+    # Summary comparison table
+    sp_modes = []
+    if 'selfplay' in results and not results['selfplay'].get('skipped'):
+        sp = results['selfplay']
+        sp_modes.append(('Process (GPU)', sp['games_per_hour'], sp['avg_time_per_game'], sp['avg_game_length']))
+    if 'gpu_selfplay' in results and not results['gpu_selfplay'].get('skipped'):
+        gsp = results['gpu_selfplay']
+        sp_modes.append(('Threaded (GPU)', gsp['games_per_hour'], gsp['avg_time_per_game'], gsp['avg_game_length']))
+    if 'cpu_selfplay' in results and not results['cpu_selfplay'].get('skipped'):
+        csp = results['cpu_selfplay']
+        sp_modes.append(('Process (CPU)', csp['games_per_hour'], csp['avg_time_per_game'], csp['avg_game_length']))
+
+    if len(sp_modes) >= 2:
+        print("|" + "-" * (W - 2) + "|")
+        print(f"|  SELF-PLAY COMPARISON".ljust(W - 1) + "|")
+        print(f"|  {'Mode':<22} {'Games/hr':>10} {'Sec/game':>10} {'Avg moves':>10}".ljust(W - 1) + "|")
+        best_gph = max(m[1] for m in sp_modes)
+        for name, gph, spg, avg_len in sp_modes:
+            marker = " <-- best" if gph == best_gph else ""
+            print(f"|    {name:<20} {gph:>10.0f} {spg:>10.1f} {avg_len:>10.0f}{marker}".ljust(W - 1) + "|")
+
     print("+" + "=" * (W - 2) + "+")
     print()
 
