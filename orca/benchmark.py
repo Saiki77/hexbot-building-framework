@@ -301,7 +301,8 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
                 times.append(t)
                 lengths.append(l)
             except Exception as e:
-                pass
+                print(f"  |  GPU worker error: {e}")
+                import traceback; traceback.print_exc()
 
     wall_time = time.perf_counter() - wall_start
     n = len(times)

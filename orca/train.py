@@ -1198,10 +1198,15 @@ class OrcaTrainer:
         def _play_one_game(game_num):
             """Play a single game in a thread."""
             import io, contextlib
-            pos = all_positions[game_num] if game_num < len(all_positions) else None
+            entry = all_positions[game_num] if game_num < len(all_positions) else None
+            pos, hints = None, None
+            if isinstance(entry, tuple) and len(entry) == 2:
+                pos, hints = entry
+            elif isinstance(entry, dict):
+                pos = entry
             with contextlib.redirect_stdout(io.StringIO()):
                 samples, moves, *rest = self_play_game_v2(
-                    self.net, mcts, start_position=pos)
+                    self.net, mcts, start_position=pos, hint_moves=hints)
             analysis = rest[0] if rest else None
             result_val = samples[0].result if samples else 0.0
             return samples, moves, result_val, analysis
