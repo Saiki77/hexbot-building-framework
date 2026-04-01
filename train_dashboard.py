@@ -591,6 +591,9 @@ class DashboardObserver:
 
     def on_iteration_complete(self, metrics: dict) -> None:
         self.metrics.add_iteration(metrics)
+        # Extract ELO from OrcaTrainer metrics
+        if 'elo' in metrics and 'iteration' in metrics:
+            self.metrics.update_elo(metrics['iteration'], metrics['elo'])
         self.sio.emit('iteration_complete', metrics)
 
     def on_training_complete(self) -> None:
@@ -1284,14 +1287,34 @@ footer span{white-space:nowrap}
 .cfg-row span.val{width:50px;text-align:right;font-size:10px}
 .cfg-ro{font:12px 'SF Mono','Courier New',monospace;color:#666}
 .cfg-hint{font:10px 'SF Mono','Courier New',monospace;color:#999;margin:-2px 0 8px 0}
-body.dark{background:#111;color:#ddd;filter:invert(1) hue-rotate(180deg)}
-body.dark canvas,body.dark img{filter:invert(1) hue-rotate(180deg)}
-body.dark header{border-color:#444}
-body.dark .left{border-color:#444}
-body.dark footer{border-color:#444}
-body.dark .chart-box{border-color:#333}
-body.dark .tab.active{background:#ddd;color:#111}
-body.dark .cfg-section-header{border-color:#333}
+body.dark{background:#0d0d0d;color:#ccc}
+body.dark header,body.dark footer,body.dark .left{border-color:#333}
+body.dark .chart-box{border-color:#222}
+body.dark .tab{color:#999}
+body.dark .tab.active{background:#ccc;color:#111}
+body.dark .tab:hover{background:#222}
+body.dark .cfg-section-header{border-color:#333;color:#bbb}
+body.dark .cfg-row label{color:#aaa;border-color:#444}
+body.dark .cfg-row input[type=number],body.dark .cfg-row select{background:#1a1a1a;color:#ddd;border-color:#444}
+body.dark .cfg-row input[type=number]:focus,body.dark .cfg-row select:focus{border-color:#888;background:#222}
+body.dark .cfg-ro{color:#888}
+body.dark .cfg-hint{color:#666}
+body.dark .status{color:#aaa}
+body.dark #hex-canvas{border-color:#333}
+body.dark .game-info{color:#888}
+body.dark .sep{color:#444}
+body.dark .res-meter{border-color:#555}
+body.dark .res-meter-fill{background:#aaa}
+body.dark .progress-track{background:#222}
+body.dark .progress-fill{background:#aaa}
+body.dark .obtn{border-color:#555;color:#888;background:#111}
+body.dark .obtn.active{background:#aaa;color:#111}
+body.dark #live-stats{border-color:#333;color:#aaa}
+body.dark button{color:#ddd}
+body.dark .conn-dot{opacity:0.8}
+body.dark .gh-item:hover{background:#222}
+body.dark .gh-item.active{background:#aaa;color:#111}
+body.dark #value-chart-wrap{border-color:#333}
 #lights-out-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:#000;z-index:9999;
   align-items:center;justify-content:center;flex-direction:column;gap:20px}
 #lights-out-overlay.active{display:flex}
@@ -2267,6 +2290,12 @@ socket.on('train_progress', d => {
 // ---------------------------------------------------------------------------
 // Line chart (HiDPI, auto-scaling)
 // ---------------------------------------------------------------------------
+function isDark() { return document.body.classList.contains('dark'); }
+function cFg() { return isDark() ? '#ccc' : '#000'; }
+function cGrid() { return isDark() ? '#333' : '#eee'; }
+function cBg() { return isDark() ? '#0d0d0d' : '#fff'; }
+function cMuted() { return isDark() ? '#666' : '#ccc'; }
+
 function drawLineChart(cv, datasets, opts) {
   if (!cv) return;
   // Skip collapsed charts
@@ -2275,14 +2304,15 @@ function drawLineChart(cv, datasets, opts) {
 
   const { w: W, h: H } = sizeCanvas(cv);
   const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = cBg(); ctx.fillRect(0, 0, W, H);
   const pad = { t: 14, r: 16, b: 24, l: 52 };
   const pW = W - pad.l - pad.r, pH = H - pad.t - pad.b;
   if (pW < 10 || pH < 10) return;
 
+  const fg = cFg(), grid = cGrid(), muted = cMuted();
   const pts = datasets.flatMap(d => d.data);
   if (pts.length < 2) {
-    ctx.fillStyle = '#ccc'; ctx.font = '11px Courier New'; ctx.textAlign = 'center';
+    ctx.fillStyle = muted; ctx.font = '11px Courier New'; ctx.textAlign = 'center';
     ctx.fillText('No data yet', W / 2, H / 2);
     return;
   }
@@ -2298,18 +2328,18 @@ function drawLineChart(cv, datasets, opts) {
   }
 
   // Axes
-  ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+  ctx.strokeStyle = fg; ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, pad.t + pH); ctx.lineTo(pad.l + pW, pad.t + pH);
   ctx.stroke();
 
   // Y ticks
-  ctx.fillStyle = '#000'; ctx.font = '10px Courier New'; ctx.textAlign = 'right';
+  ctx.fillStyle = fg; ctx.font = '10px Courier New'; ctx.textAlign = 'right';
   for (let i = 0; i <= 4; i++) {
     const yV = yMn + (yMx - yMn) * i / 4;
     const [, sy] = toP(xMn, yV);
     ctx.fillText(yV.toFixed(1), pad.l - 4, sy + 3);
-    ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.5;
+    ctx.strokeStyle = grid; ctx.lineWidth = 0.5;
     ctx.beginPath(); ctx.moveTo(pad.l, sy); ctx.lineTo(pad.l + pW, sy); ctx.stroke();
   }
 
@@ -2318,7 +2348,7 @@ function drawLineChart(cv, datasets, opts) {
   const xStep = Math.max(1, Math.ceil((xMx - xMn) / 6));
   for (let x = Math.ceil(xMn); x <= xMx; x += xStep) {
     const [sx] = toP(x, yMn);
-    ctx.fillStyle = '#000'; ctx.fillText(x, sx, pad.t + pH + 14);
+    ctx.fillStyle = fg; ctx.fillText(x, sx, pad.t + pH + 14);
   }
 
   // Lines
@@ -2326,7 +2356,7 @@ function drawLineChart(cv, datasets, opts) {
   datasets.forEach((ds, di) => {
     if (ds.data.length < 2) return;
     ctx.setLineDash(ds.dash || defaultDash[di % defaultDash.length] || []);
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.3;
+    ctx.strokeStyle = fg; ctx.lineWidth = 1.3;
     ctx.beginPath();
     ds.data.forEach((p, i) => {
       const [sx, sy] = toP(p.x, p.y);
@@ -2341,10 +2371,10 @@ function drawLineChart(cv, datasets, opts) {
   datasets.forEach((ds, di) => {
     const lx = pad.l + 8 + di * 90, ly = pad.t + 10;
     ctx.setLineDash(ds.dash || defaultDash[di % defaultDash.length] || []);
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.3;
+    ctx.strokeStyle = fg; ctx.lineWidth = 1.3;
     ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 18, ly); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#000'; ctx.fillText(ds.label, lx + 22, ly + 3);
+    ctx.fillStyle = fg; ctx.fillText(ds.label, lx + 22, ly + 3);
   });
 }
 
