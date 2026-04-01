@@ -10,13 +10,10 @@ Then open http://localhost:5001
 
 from __future__ import annotations
 import sys
-import math
 import multiprocessing
-import random
 import os
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -27,12 +24,9 @@ from flask_socketio import SocketIO
 
 from main import HexGame
 from bot import (
-    HexNet, MCTS, ReplayBuffer, self_play_game, train_step,
-    get_device, BOARD_SIZE, NUM_SIMULATIONS, BATCH_SIZE, LEARNING_RATE, L2_REG,
-    TrainingSample, OnnxPredictor, export_onnx,
-    POSITION_CATALOG, generate_puzzles, augment_sample,
-    load_human_games, load_online_games, find_forced_move,
-    encode_state,
+    HexNet, MCTS, self_play_game,
+    get_device, NUM_SIMULATIONS, BATCH_SIZE, LEARNING_RATE, L2_REG,
+    OnnxPredictor, encode_state,
 )
 
 # ---------------------------------------------------------------------------
@@ -618,6 +612,13 @@ class DashboardObserver:
 # ---------------------------------------------------------------------------
 
 class TrainingManager:
+    """Wraps OrcaTrainer with dashboard observer for web UI training.
+
+    Delegates all training logic to orca/train.py's OrcaTrainer.
+    The dashboard only provides the observer (for SocketIO events)
+    and the start/stop controls.
+    """
+
     def __init__(self, metrics: MetricsStore, observer: DashboardObserver,
                  sio: SocketIO, resource_monitor: ResourceMonitor):
         self.metrics = metrics
@@ -626,9 +627,10 @@ class TrainingManager:
         self.resource = resource_monitor
         self.device = get_device()
         self.net: Optional[HexNet] = None
-        self.model_vault = ModelVault(max_models=200)
-        self.arena = GenerationalArena(self.device)
+        self.model_vault = None
+        self.arena = None
         self._thread: Optional[threading.Thread] = None
+        self._trainer = None
 
     def start(self, num_iterations=999999, games_per_iter=100,
               train_steps=200) -> bool:
@@ -647,615 +649,24 @@ class TrainingManager:
     def stop(self):
         self.observer.request_stop()
 
-    @staticmethod
-    def _find_latest_checkpoint() -> Optional[str]:
-        """Find the latest hex_checkpoint_N.pt file."""
-        import glob
-        ckpts = glob.glob('hex_checkpoint_*.pt')
-        if not ckpts:
-            return None
-        # Sort by iteration number
-        def get_iter(path):
-            try:
-                return int(path.replace('hex_checkpoint_', '').replace('.pt', ''))
-            except ValueError:
-                return -1
-        ckpts.sort(key=get_iter)
-        return ckpts[-1]
-
     def _run(self, num_iterations, games_per_iter, train_steps):
-        # Use create_network factory - 'large' for maximum strength
-        try:
-            from bot import create_network
-            self.net = create_network('standard').to(self.device)
-            self._net_config = 'standard'
-        except ImportError:
-            self.net = HexNet(num_filters=256, num_res_blocks=12).to(self.device)
-            self._net_config = 'standard'
-        param_count = sum(p.numel() for p in self.net.parameters())
+        """Delegate to OrcaTrainer with the dashboard observer."""
+        from orca.train import OrcaTrainer
 
-        print(f'\n{"="*60}')
-        print(f'  TRAINING PIPELINE INITIALIZED')
-        print(f'{"="*60}')
-        print(f'  Network:     {self._net_config} ({param_count:,} params)')
-        print(f'  Device:      {self.device}')
-        print(f'  Iterations:  ∞ (runs until stopped)')
-        print(f'  Games/iter:  {games_per_iter} (base, scaled by curriculum)')
-        print(f'  Train steps: {train_steps}/iter')
-
-        # Detect C engine availability
-        use_v2 = False
-        try:
-            from bot import CGameState
-            CGameState()
-            use_v2 = True
-            print(f'  Engine:      C engine (v2) OK:')
-        except Exception as e:
-            print(f'  Engine:      Python (v1) - C engine unavailable: {e}')
-
-        optimizer = torch.optim.Adam(
-            self.net.parameters(), lr=0.001, weight_decay=L2_REG
+        self._trainer = OrcaTrainer(
+            iterations=num_iterations,
+            games_per_iter=games_per_iter,
+            train_steps=train_steps,
+            observer=self.observer,
+            resume=True,
         )
-        # Cosine annealing: cycles LR between 0.001 and 0.0001
-        # T_0=50 means first cycle is 50 iterations, then doubles each cycle
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=50, T_mult=2, eta_min=1e-4
-        )
-        replay_buffer = ReplayBuffer()
-        # Cap workers for power-limited training (90W charger)
-        num_workers = min(self.resource.num_threads, 5)
-        auto_tuner = AutoTuner()
-        self._auto_tuner = auto_tuner
+        self._trainer.run()
 
-        # --- Resume from checkpoint if available ---
-        start_iteration = 0
-        resume_path = self._find_latest_checkpoint()
-        if resume_path:
-            try:
-                ckpt = torch.load(resume_path, map_location=self.device, weights_only=False)
-                # Migrate channels (5->7) and filters (128->256) if needed
-                from bot import migrate_checkpoint_5to7, migrate_checkpoint_filters
-                old_shape = ckpt['model_state_dict'].get('conv_init.weight', None)
-                migrated_sd = migrate_checkpoint_5to7(ckpt['model_state_dict'])
-                migrated_sd = migrate_checkpoint_filters(migrated_sd)
-                new_shape = migrated_sd.get('conv_init.weight', None)
-                arch_changed = (old_shape is not None and new_shape is not None
-                                and old_shape.shape != new_shape.shape)
-                ckpt['model_state_dict'] = migrated_sd
-                self.net.load_state_dict(migrated_sd, strict=False)
-                # Skip optimizer restore if architecture changed (Adam momentum buffers wrong shape)
-                if arch_changed:
-                    print(f'    WARN: Fresh optimizer (conv_init migrated {old_shape.shape}->{new_shape.shape})')
-                else:
-                    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-                start_iteration = ckpt.get('iteration', 0) + 1
-
-                # CRITICAL: Force LR back to a healthy value
-                # The old training decayed LR to ~7e-6 (frozen). Reset it.
-                for pg in optimizer.param_groups:
-                    if pg['lr'] < 1e-4:
-                        pg['lr'] = 0.001
-                        print(f'    WARN: LR was frozen at {pg["lr"]:.2e}, reset to 0.001')
-
-                # Restore scheduler state if available
-                if 'scheduler_state_dict' in ckpt:
-                    try:
-                        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-                    except Exception:
-                        pass  # scheduler format changed, start fresh
-
-                # Restore replay buffer from separate file
-                import pickle
-                buf_path = os.path.join(os.path.dirname(resume_path), 'replay_buffer.pkl')
-                if os.path.exists(buf_path):
-                    try:
-                        with open(buf_path, 'rb') as f:
-                            buf_data = pickle.load(f)
-                        replay_buffer.buffer.extend(buf_data.get('buffer', []))
-                        replay_buffer.priorities.extend(buf_data.get('priorities', []))
-                        print(f'    OK: Restored replay buffer: {len(replay_buffer.buffer)} samples')
-                    except Exception as e:
-                        print(f'    WARN: Could not restore buffer: {e}')
-
-                # Restore metrics
-                if 'metrics' in ckpt:
-                    m = ckpt['metrics']
-                    self.metrics.iterations = m.get('iterations', [])
-                    self.metrics.elo_history = m.get('elo_history', [])
-                    self.metrics.current_elo = m.get('current_elo', 1000)
-                    self.metrics.total_games = m.get('total_games', 0)
-                    self.metrics.current_iteration = start_iteration
-                # Restore AutoTuner (but NOT the LR - that's managed by scheduler now)
-                if 'auto_tuner' in ckpt:
-                    at = ckpt['auto_tuner']
-                    auto_tuner.params = at.get('params', auto_tuner.params)
-                    auto_tuner.params['lr'] = optimizer.param_groups[0]['lr']  # sync with optimizer
-                    # Force pure self-play (override old mix from checkpoint)
-                    auto_tuner.params['mix_normal'] = 1.0
-                    auto_tuner.params['mix_catalog'] = 0.0
-                    auto_tuner.params['mix_endgame'] = 0.0
-                    auto_tuner.params['mix_formation'] = 0.0
-                    auto_tuner.params['mix_sequence'] = 0.0
-                    auto_tuner.loss_history = at.get('loss_history', [])
-                    auto_tuner.elo_history = at.get('elo_history', [])
-                current_lr = optimizer.param_groups[0]['lr']
-                print(f'  OK: Resumed from {resume_path} (iter {start_iteration})')
-                print(f'    ELO: {self.metrics.current_elo:.0f}, '
-                      f'Games: {self.metrics.total_games}, '
-                      f'LR: {current_lr:.5f}')
-            except Exception as e:
-                print(f'  WARN: Failed to resume: {e} - starting fresh')
-                start_iteration = 0
-        else:
-            print(f'  No checkpoint found - starting fresh')
-
-        print(f'  Workers:     {num_workers}')
-        print(f'  LR:          {auto_tuner.params["lr"]} -> auto-tuned')
-        print(f'  AutoTuner:   OK: (self-improving)')
-        print(f'{"="*60}\n')
-
-        for iteration in range(start_iteration, num_iterations):
-            if self.observer.should_stop():
-                print(f'\n  STOP: Training stopped by user at iteration {iteration}')
-                break
-            self.observer.on_iteration_start(iteration, num_iterations)
-
-            prev_state = {k: v.clone() for k, v in self.net.state_dict().items()}
-
-            # --- Curriculum (AutoTuner can override sims) ---
-            current_sims = max(auto_tuner.params['sims'],
-                               get_curriculum_sims(iteration))
-            current_games = get_curriculum_games(iteration, games_per_iter)
-            current_lr = optimizer.param_groups[0]['lr']
-
-            hours = (time.perf_counter() - _curriculum_start_time) / 3600 if _curriculum_start_time else 0
-            print(f'  ┌─ Iter {iteration+1}/{num_iterations} '
-                  f'│ sims={current_sims} │ games={current_games} │ lr={current_lr:.4f} │ {hours:.1f}h')
-
-            # --- Load human games on first iteration ---
-            if iteration == 0:
-                human_path = os.path.join(os.path.dirname(__file__), 'human_games.jsonl')
-                if os.path.exists(human_path):
-                    t_human = time.perf_counter()
-                    human_samples = load_human_games(human_path, max_games=500, min_elo=1000)
-                    for s in human_samples:
-                        s.priority = 0.8  # lower than self-play to avoid dominating
-                        replay_buffer.push(s)
-                    t_human = time.perf_counter() - t_human
-                    print(f'  │  Human games: {len(human_samples)} samples loaded ({t_human:.1f}s)')
-                else:
-                    print(f'  │  Human games: not found (run scrape_games.py first)')
-
-            # --- Export ONNX for fast CPU workers ---
-            t0 = time.perf_counter()
-            t_export_start = time.perf_counter()
-            self.net.eval()
-            onnx_path = f'/tmp/hex_model_{iteration}.onnx'
-            export_onnx(self.net, onnx_path)
-            self.net.to(self.device)  # move back to GPU after export
-            t_export = time.perf_counter() - t_export_start
-            print(f'  │  ONNX export: {t_export:.1f}s')
-
-            # --- Adaptive game mix: 5 categories (AutoTuner-driven) ---
-            import random as _rng
-            ap = auto_tuner.params
-            mix = (ap['mix_normal'], ap['mix_catalog'], ap['mix_endgame'],
-                   ap['mix_formation'], ap['mix_sequence'])
-            n_normal = int(current_games * mix[0])
-            n_catalog = int(current_games * mix[1])
-            n_endgame = int(current_games * mix[2])
-            n_formation = int(current_games * mix[3])
-            n_sequence = current_games - n_normal - n_catalog - n_endgame - n_formation
-            print(f'  │  Game mix: {n_normal} normal + {n_catalog} catalog + '
-                  f'{n_endgame} L1-endgame + {n_formation} L2-formation + {n_sequence} L3-sequence')
-
-            # Generate position lists for workers
-            catalog_keys = list(POSITION_CATALOG.keys())
-            catalog_positions = [
-                (POSITION_CATALOG[_rng.choice(catalog_keys)], None)
-                for _ in range(n_catalog)
-            ]
-
-            # Guided positions by level
-            from bot import GUIDED_POSITIONS, get_guided_positions_by_level
-            l1 = get_guided_positions_by_level(1)
-            l2 = get_guided_positions_by_level(2)
-            l3 = get_guided_positions_by_level(3)
-
-            endgame_positions = [_rng.choice(l1) if l1 else (None, None) for _ in range(n_endgame)]
-            formation_positions = [_rng.choice(l2) if l2 else (None, None) for _ in range(n_formation)]
-            sequence_positions = [_rng.choice(l3) if l3 else (None, None) for _ in range(n_sequence)]
-
-            # Also generate some random puzzles as fallback
-            puzzle_positions = generate_puzzles(n_endgame // 2)
-            extra_puzzles = [(p, None) for p in puzzle_positions]
-
-            # All positions: (position_dict_or_None, hint_moves_or_None)
-            all_positions = (
-                catalog_positions +
-                endgame_positions +
-                formation_positions +
-                sequence_positions +
-                extra_puzzles[:n_endgame // 2] +
-                [(None, None)] * n_normal
-            )
-            # Trim to exact game count
-            all_positions = all_positions[:current_games]
-            while len(all_positions) < current_games:
-                all_positions.append((None, None))
-            _rng.shuffle(all_positions)
-
-            # Distribute across workers with positions
-            chunks = []
-            chunk_positions = []
-            remaining = current_games
-            pos_offset = 0
-            for i in range(num_workers):
-                c = remaining // (num_workers - i)
-                chunks.append(c)
-                chunk_positions.append(all_positions[pos_offset:pos_offset + c])
-                pos_offset += c
-                remaining -= c
-
-            active_chunks = [c for c in chunks if c > 0]
-            print(f'  │  Dispatching {len(active_chunks)} workers: '
-                  f'{active_chunks}')
-
-            total_samples = 0
-            total_moves = 0
-            wins = [0, 0, 0]
-            game_idx = 0
-            collected_samples = []  # for augmentation
-            worker_errors = 0
-
-            t_selfplay_start = time.perf_counter()
-
-            if use_v2 and self.device.type == 'cuda':
-                # CUDA threaded: shared GPU network, no process spawn overhead
-                from concurrent.futures import ThreadPoolExecutor
-                from bot import self_play_game_v2 as _spv2, BatchedMCTS as _BMCTS
-                import io as _io, contextlib as _cl
-
-                print(f'  |  Self-play: CUDA threaded ({num_workers} threads, '
-                      f'{current_sims} sims)...')
-                self.net.eval()
-                _mcts = _BMCTS(self.net, num_simulations=current_sims, batch_size=64)
-                _lock = threading.Lock()
-
-                def _play_game(gi):
-                    pos = flat_pos[gi] if gi < len(flat_pos) else None
-                    with _cl.redirect_stdout(_io.StringIO()):
-                        samples, moves, *rest = _spv2(self.net, _mcts, start_position=pos)
-                    ana = rest[0] if rest else None
-                    rv = samples[0].result if samples else 0.0
-                    return samples, moves, rv, ana
-
-                flat_pos = []
-                for c, pos in zip(chunks, chunk_positions):
-                    for gi in range(c):
-                        flat_pos.append(pos[gi] if pos and gi < len(pos) else None)
-
-                with ThreadPoolExecutor(max_workers=num_workers) as pool:
-                    futs = {pool.submit(_play_game, i): i for i in range(current_games)}
-                    for future in as_completed(futs):
-                        if self.observer.should_stop():
-                            break
-                        try:
-                            samples, move_hist, result_val, ana_data = future.result()
-                        except Exception as e:
-                            worker_errors += 1
-                            print(f'  |  Thread error: {e}')
-                            continue
-                        for s in samples:
-                            replay_buffer.push(s)
-                            collected_samples.append(s)
-                        total_samples += len(samples)
-                        total_moves += len(move_hist)
-                        if result_val > 0: wins[0] += 1
-                        elif result_val < 0: wins[1] += 1
-                        else: wins[2] += 1
-                        game_idx += 1
-                        self.observer.on_game_complete(
-                            game_idx, current_games,
-                            [list(m) for m in move_hist],
-                            result_val, len(samples))
-
-            elif use_v2:
-                # MPS/CPU: ProcessPool with C engine + PyTorch
-                net_state = {k: v.cpu() for k, v in self.net.state_dict().items()}
-
-                # Asymmetric self-play: 25% of workers use an older checkpoint as opponent
-                n_asymmetric = 0
-                if len(self.model_vault) > 1:
-                    n_asymmetric = max(1, num_workers // 4)
-
-                print(f'  │  Self-play: V2 (C engine + MCTS {current_sims} sims'
-                      f'{f", {n_asymmetric} asymmetric" if n_asymmetric else ""})...')
-
-                with ProcessPoolExecutor(max_workers=num_workers) as pool:
-                    futures = []
-                    # 2 games per future: first results after ~1 min, good streaming
-                    GAMES_PER_FUTURE = 2
-                    flat_positions = []
-                    for c, pos in zip(chunks, chunk_positions):
-                        for gi in range(c):
-                            p = pos[gi] if pos and gi < len(pos) else None
-                            flat_positions.append(p)
-                    for i in range(0, len(flat_positions), GAMES_PER_FUTURE):
-                        batch_pos = flat_positions[i:i+GAMES_PER_FUTURE]
-                        # Wrap in list if positions are provided
-                        pos_arg = [p for p in batch_pos] if any(batch_pos) else None
-                        futures.append(
-                            pool.submit(_self_play_worker_v2, net_state,
-                                        self._net_config, current_sims,
-                                        len(batch_pos), pos_arg,
-                                        use_alphabeta=False)
-                        )
-                    print(f'  │  Dispatching {len(futures)} futures ({GAMES_PER_FUTURE} games each, {num_workers} workers)')
-                    for future in as_completed(futures):
-                        if self.observer.should_stop():
-                            break
-                        try:
-                            batch_results = future.result()
-                        except Exception as e:
-                            worker_errors += 1
-                            print(f'  │  WARN: V2 Worker error: {e}')
-                            import traceback
-                            traceback.print_exc()
-                            continue
-
-                        for serialized, move_hist, result_val, n_samples in batch_results:
-                            for sd in serialized:
-                                sample = TrainingSample(
-                                    encoded_state=torch.from_numpy(sd['state']),
-                                    policy_target=sd['policy'],
-                                    player=sd['player'],
-                                    result=sd['result'],
-                                    threat_label=sd.get('threat'),
-                                    priority=sd.get('priority', 1.0),
-                                )
-                                replay_buffer.push(sample)
-                                collected_samples.append(sample)
-                            total_samples += n_samples
-                            total_moves += len(move_hist)
-                            if result_val > 0:
-                                wins[0] += 1
-                            elif result_val < 0:
-                                wins[1] += 1
-                            else:
-                                wins[2] += 1
-                            game_idx += 1
-                            from datetime import datetime
-                            winner = 'P0' if result_val > 0 else ('P1' if result_val < 0 else 'draw')
-                            print(f'  │  [{datetime.now().strftime("%H:%M:%S")}] Game {game_idx}/{current_games}: {winner} in {len(move_hist)} moves ({n_samples} samples)')
-                            self.observer.on_game_complete(
-                                game_idx, current_games, move_hist,
-                                result_val, n_samples,
-                            )
-            else:
-                # V1 fallback: ONNX workers
-                print(f'  │  Self-play: V1 (ONNX Runtime)...')
-                with ProcessPoolExecutor(max_workers=num_workers) as pool:
-                    futures = [
-                        pool.submit(_self_play_worker, onnx_path, current_sims, c, pos)
-                        for c, pos in zip(chunks, chunk_positions) if c > 0
-                    ]
-                    for future in as_completed(futures):
-                        if self.observer.should_stop():
-                            break
-                        try:
-                            batch_results = future.result()
-                        except Exception as e:
-                            worker_errors += 1
-                            print(f'  │  WARN: Worker error: {e}')
-                            import traceback
-                            traceback.print_exc()
-                            continue
-
-                        for serialized, move_hist, result_val, n_samples in batch_results:
-                            for sd in serialized:
-                                sample = TrainingSample(
-                                    encoded_state=torch.from_numpy(sd['state']),
-                                    policy_target=sd['policy'],
-                                    player=sd['player'],
-                                    result=sd['result'],
-                                    threat_label=sd.get('threat'),
-                                    priority=sd.get('priority', 1.0),
-                                )
-                                replay_buffer.push(sample)
-                                collected_samples.append(sample)
-                            total_samples += n_samples
-                            total_moves += len(move_hist)
-                            if result_val > 0:
-                                wins[0] += 1
-                            elif result_val < 0:
-                                wins[1] += 1
-                            else:
-                                wins[2] += 1
-                            game_idx += 1
-                            from datetime import datetime
-                            winner = 'P0' if result_val > 0 else ('P1' if result_val < 0 else 'draw')
-                            print(f'  │  [{datetime.now().strftime("%H:%M:%S")}] Game {game_idx}/{current_games}: {winner} in {len(move_hist)} moves ({n_samples} samples)')
-                            self.observer.on_game_complete(
-                                game_idx, current_games, move_hist,
-                                result_val, n_samples,
-                            )
-
-            t_selfplay = time.perf_counter() - t_selfplay_start
-            games_per_sec = game_idx / t_selfplay if t_selfplay > 0 else 0
-            print(f'  │  Self-play done: {game_idx} games, {total_samples} samples, '
-                  f'{t_selfplay:.1f}s ({games_per_sec:.1f} games/s)')
-            print(f'  │  Wins: P0={wins[0]} P1={wins[1]} draw={wins[2]}')
-            if worker_errors > 0:
-                print(f'  │  WARN: {worker_errors} worker(s) failed')
-
-            # --- Load new online games (human feedback) ---
-            online_path = os.path.join(os.path.dirname(__file__), 'online_games.jsonl')
-            if not hasattr(self, '_online_lines_read'):
-                self._online_lines_read = 0
-            try:
-                online_samples, new_pos = load_online_games(
-                    online_path, start_line=self._online_lines_read)
-                if online_samples:
-                    for s in online_samples:
-                        replay_buffer.push(s)
-                        collected_samples.append(s)  # include in augmentation too
-                    self._online_lines_read = new_pos
-                    print(f'  │  Online games: +{len(online_samples)} samples (priority 2.0)')
-            except Exception as e:
-                pass  # online games are optional
-
-            # --- Symmetry augmentation: 3x data multiplier (hex-on-grid valid) ---
-            t_aug_start = time.perf_counter()
-            aug_count = 0
-            for sample in collected_samples:
-                for aug in augment_sample(sample):
-                    replay_buffer.push(aug)
-                    aug_count += 1
-            total_samples += aug_count
-            t_aug = time.perf_counter() - t_aug_start
-            print(f'  │  Augmentation: +{aug_count} samples ({t_aug:.1f}s) '
-                  f'-> buffer={len(replay_buffer)}/{replay_buffer.buffer.maxlen}')
-
-            sp_time = time.perf_counter() - t0
-
-            # --- GPU training (aggressive) ---
-            losses = {'total': 0, 'value': 0, 'policy': 0}
-            train_time = 0
-            if len(replay_buffer) >= BATCH_SIZE:
-                print(f'  │  Training: {train_steps} steps on {self.device} '
-                      f'(batch={BATCH_SIZE}, buffer={len(replay_buffer)})...')
-                t1 = time.perf_counter()
-                self.net.train()
-                for step in range(train_steps):
-                    losses = train_step(
-                        self.net, optimizer, replay_buffer, self.device
-                    )
-                    # Emit progress every 50 steps (less overhead)
-                    if step % 50 == 0 or step == train_steps - 1:
-                        self.sio.emit('train_progress', {
-                            'step': step + 1,
-                            'total': train_steps,
-                            'loss': round(losses['total'], 4),
-                            'pct': round((step + 1) / train_steps * 100),
-                        })
-                train_time = time.perf_counter() - t1
-                steps_per_sec = train_steps / train_time if train_time > 0 else 0
-                scheduler.step()
-                # Sync LR from scheduler to AutoTuner (for display)
-                current_lr = optimizer.param_groups[0]['lr']
-                auto_tuner.params['lr'] = current_lr
-                print(f'  │  Training done: {train_time:.1f}s ({steps_per_sec:.0f} steps/s) '
-                      f'loss={losses["total"]:.4f} (v={losses["value"]:.4f} p={losses["policy"]:.4f}) '
-                      f'lr={current_lr:.6f}')
-            else:
-                print(f'  │  Training skipped: buffer too small ({len(replay_buffer)}<{BATCH_SIZE})')
-
-            # ELO eval (every 2 iterations) - generational tournament
-            elo_str = ''
-            if len(replay_buffer) >= BATCH_SIZE and (iteration + 1) % 2 == 0:
-                # Store current generation in vault
-                self.model_vault.add(iteration + 1, self.net.state_dict())
-                n_opp = min(self.arena.max_opponents, len(self.model_vault) - 1)
-                n_games = n_opp * self.arena.games_per_opponent
-                print(f'  │  ELO evaluation ({n_games} games vs {n_opp} generations, '
-                      f'vault={len(self.model_vault)})...')
-                t_elo = time.perf_counter()
-                new_elo = self.arena.evaluate(
-                    self.net, self.model_vault, self.metrics.current_elo
-                )
-                t_elo = time.perf_counter() - t_elo
-                delta = new_elo - self.metrics.current_elo
-                sign = '+' if delta >= 0 else ''
-                self.metrics.update_elo(iteration + 1, new_elo)
-                update_curriculum_plateau(new_elo)
-                elo_str = f' │ ELO {new_elo:.0f} ({sign}{delta:.0f})'
-                stall_info = f' stall={_curriculum_stall_iters}' if _curriculum_stall_iters > 0 else ''
-                print(f'  │  ELO: {new_elo:.0f} ({sign}{delta:.0f}) in {t_elo:.1f}s{stall_info}')
-
-            res_snap = self.resource.snapshot()
-            avg_len = total_moves / max(game_idx, 1)
-            total_time = time.perf_counter() - t0
-            metrics = {
-                'iteration': iteration + 1,
-                'games': game_idx,
-                'samples': total_samples,
-                'wins': wins,
-                'self_play_time': round(sp_time, 1),
-                'train_time': round(train_time, 1),
-                'loss': losses,
-                'buffer_size': len(replay_buffer),
-                'avg_game_length': round(avg_len, 1),
-                'elo': round(self.metrics.current_elo, 1),
-                'workers': num_workers,
-                'cpu_pct': res_snap['cpu_pct'],
-                'ram_pct': res_snap['ram_pct'],
-                'sims': current_sims,
-                'lr': round(optimizer.param_groups[0]['lr'], 5),
-            }
-            self.observer.on_iteration_complete(metrics)
-
-            # --- AutoTuner: observe and adapt ---
-            gps = game_idx / t_selfplay if t_selfplay > 0 else 1.0
-            at_metrics = {
-                'total_loss': metrics.get('loss', {}).get('total', 0),
-                'value_loss': metrics.get('loss', {}).get('value', 0),
-                'policy_loss': metrics.get('loss', {}).get('policy', 0),
-                'elo': self.metrics.current_elo,
-                'games_per_sec': gps,
-                'buffer_fill': len(replay_buffer) / replay_buffer.buffer.maxlen,
-            }
-            new_params = auto_tuner.update(at_metrics, iteration)
-            # Apply LR change
-            for pg in optimizer.param_groups:
-                pg['lr'] = new_params['lr']
-
-            print(f'  └─ Iter {iteration+1} done: {total_time:.1f}s total '
-                  f'│ {game_idx} games │ {total_samples} samples '
-                  f'│ CPU {res_snap["cpu_pct"]:.0f}% │ RAM {res_snap["ram_pct"]:.0f}%'
-                  f'{elo_str}')
-            print()
-
-            if (iteration + 1) % 5 == 0:
-                ckpt_path = f'hex_checkpoint_{iteration+1}.pt'
-                torch.save({
-                    'iteration': iteration,
-                    'model_state_dict': self.net.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'metrics': {
-                        'iterations': self.metrics.iterations,
-                        'elo_history': self.metrics.elo_history,
-                        'current_elo': self.metrics.current_elo,
-                        'total_games': self.metrics.total_games,
-                    },
-                    'auto_tuner': {
-                        'params': auto_tuner.params,
-                        'loss_history': auto_tuner.loss_history,
-                        'elo_history': auto_tuner.elo_history,
-                    },
-                }, ckpt_path)
-                # Save replay buffer separately (too large for .pt)
-                import pickle
-                try:
-                    buf_path = 'replay_buffer.pkl'
-                    with open(buf_path, 'wb') as f:
-                        pickle.dump({
-                            'buffer': list(replay_buffer.buffer),
-                            'priorities': list(replay_buffer.priorities),
-                        }, f, protocol=pickle.HIGHEST_PROTOCOL)
-                except Exception as e:
-                    print(f'  WARN: Buffer save failed: {e}')
-                print(f'   Checkpoint saved: {ckpt_path} + buffer ({len(replay_buffer.buffer)} samples)')
-
-        print(f'\n{"="*60}')
-        print(f'  TRAINING COMPLETE - {num_iterations} iterations')
-        print(f'  Final ELO: {self.metrics.current_elo:.0f}')
-        print(f'  Total games: {self.metrics.total_games}')
-        print(f'{"="*60}\n')
-        self.observer.on_training_complete()
-
-
+        # Sync state back for dashboard access
+        self.net = self._trainer.net
+        self.model_vault = self._trainer.model_vault
+        self.arena = self._trainer.arena
+        self.metrics.is_training = False
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Background game scraper (gentle - 1 game every 10 seconds)
@@ -1382,8 +793,8 @@ def api_stats():
 def api_elo():
     result = {
         'elo_history': metrics_store.get_elo_history(),
-        'vault_size': len(training_mgr.model_vault) if training_mgr else 0,
-        'matchups': training_mgr.arena.get_matchup_summary() if training_mgr else {},
+        'vault_size': len(training_mgr.model_vault) if training_mgr and training_mgr.model_vault else 0,
+        'matchups': training_mgr.arena.get_matchup_summary() if training_mgr and training_mgr.arena else {},
     }
     return jsonify(result)
 
@@ -1411,8 +822,10 @@ def api_resources():
 
 @app.route('/api/autotuner')
 def api_autotuner():
-    if training_mgr and hasattr(training_mgr, '_auto_tuner'):
-        return jsonify(training_mgr._auto_tuner.get_status())
+    if training_mgr and hasattr(training_mgr, '_trainer') and training_mgr._trainer:
+        tuner = getattr(training_mgr._trainer, '_auto_tuner', None)
+        if tuner:
+            return jsonify(tuner.get_status())
     return jsonify({'params': {}, 'history': [], 'decisions': []})
 
 
@@ -1480,54 +893,137 @@ def train_stop():
 
 @app.route('/api/config')
 def api_config():
-    """Get current training configuration."""
-    from bot import (BATCH_SIZE, LEARNING_RATE, L2_REG, NUM_SIMULATIONS,
-                     NUM_FILTERS, NUM_RES_BLOCKS, PLAY_STYLE,
-                     C_BLEND_ADJACENT, C_BLEND_DISTANT, DIRICHLET_ALPHA,
-                     TEMP_THRESHOLD, REPLAY_BUFFER_SIZE)
+    """Get current training configuration (all orca/config.py parameters)."""
+    import orca.config as cfg
     return jsonify({
         'network': {
-            'filters': NUM_FILTERS, 'res_blocks': NUM_RES_BLOCKS,
-        },
-        'training': {
-            'batch_size': BATCH_SIZE, 'lr': LEARNING_RATE,
-            'l2_reg': L2_REG, 'buffer_size': REPLAY_BUFFER_SIZE,
+            'board_size': cfg.BOARD_SIZE,
+            'num_channels': cfg.NUM_CHANNELS,
+            'filters': cfg.NUM_FILTERS,
+            'res_blocks': cfg.NUM_RES_BLOCKS,
         },
         'search': {
-            'sims': NUM_SIMULATIONS, 'dirichlet_alpha': DIRICHLET_ALPHA,
-            'temp_threshold': TEMP_THRESHOLD,
+            'c_puct': cfg.C_PUCT,
+            'sims': cfg.NUM_SIMULATIONS,
+            'mcts_batch': cfg.MCTS_BATCH_SIZE,
+            'dirichlet_alpha': cfg.DIRICHLET_ALPHA,
+            'dirichlet_epsilon': cfg.DIRICHLET_EPSILON,
+            'temp_threshold': cfg.TEMP_THRESHOLD,
         },
         'play_style': {
-            'style': PLAY_STYLE,
-            'c_blend_adjacent': C_BLEND_ADJACENT,
-            'c_blend_distant': C_BLEND_DISTANT,
+            'style': cfg.PLAY_STYLE,
+            'c_blend_adjacent': cfg.C_BLEND_ADJACENT,
+            'c_blend_distant': cfg.C_BLEND_DISTANT,
+            'distant_explore_prob': cfg.DISTANT_EXPLORE_PROB,
+        },
+        'training': {
+            'batch_size': cfg.BATCH_SIZE,
+            'lr': cfg.LEARNING_RATE,
+            'l2_reg': cfg.L2_REG,
+            'buffer_size': cfg.REPLAY_BUFFER_SIZE,
+        },
+        'pipeline': {
+            'train_steps': cfg.DEFAULT_TRAIN_STEPS,
+            'games_per_iter': cfg.DEFAULT_GAMES_PER_ITER,
+            'checkpoint_every': cfg.CHECKPOINT_EVERY,
+            'max_workers': cfg.MAX_WORKERS,
+            'games_per_future': cfg.GAMES_PER_FUTURE,
+        },
+        'elo': {
+            'eval_every': cfg.ELO_EVAL_EVERY,
+            'eval_games': cfg.ELO_EVAL_GAMES,
+            'eval_sims': cfg.ELO_EVAL_SIMS,
+            'max_opponents': cfg.ELO_MAX_OPPONENTS,
+            'baseline_games': cfg.ELO_BASELINE_GAMES,
+            'vault_max_models': cfg.VAULT_MAX_MODELS,
+        },
+        'curriculum': {
+            'plateau_threshold': cfg.PLATEAU_THRESHOLD,
+            'plateau_iters': cfg.PLATEAU_ITERS,
+            'plateau_sim_boost': cfg.PLATEAU_SIM_BOOST,
+        },
+        'lr_schedule': {
+            'cosine_t0': cfg.COSINE_T0,
+            'cosine_t_mult': cfg.COSINE_T_MULT,
+            'cosine_eta_min': cfg.COSINE_ETA_MIN,
+        },
+        'defensive': {
+            'blocking_priority_boost': cfg.BLOCKING_PRIORITY_BOOST,
+            'survival_priority_boost': cfg.SURVIVAL_PRIORITY_BOOST,
+            'use_ab_hybrid': cfg.USE_AB_HYBRID,
+            'ab_hybrid_depth': cfg.AB_HYBRID_DEPTH,
+        },
+        'mixed_precision': {
+            'enabled': cfg.USE_MIXED_PRECISION,
+            'grad_clip_norm': cfg.GRAD_CLIP_NORM,
         },
     })
 
 
 @app.route('/api/config', methods=['POST'])
 def api_config_update():
-    """Update training config (applies to next iteration)."""
-    import bot
+    """Update training config (applies to next OrcaTrainer run)."""
+    import orca.config as cfg
     data = request.json or {}
     updated = []
-    # Training params
-    if 'batch_size' in data:
-        bot.BATCH_SIZE = int(data['batch_size']); updated.append('batch_size')
-    if 'lr' in data:
-        bot.LEARNING_RATE = float(data['lr']); updated.append('lr')
-    if 'sims' in data:
-        bot.NUM_SIMULATIONS = int(data['sims']); updated.append('sims')
-    if 'dirichlet_alpha' in data:
-        bot.DIRICHLET_ALPHA = float(data['dirichlet_alpha']); updated.append('dirichlet_alpha')
-    if 'temp_threshold' in data:
-        bot.TEMP_THRESHOLD = int(data['temp_threshold']); updated.append('temp_threshold')
-    if 'play_style' in data:
-        bot.PLAY_STYLE = data['play_style']; updated.append('play_style')
-    if 'c_blend_adjacent' in data:
-        bot.C_BLEND_ADJACENT = float(data['c_blend_adjacent']); updated.append('c_blend_adjacent')
-    if 'c_blend_distant' in data:
-        bot.C_BLEND_DISTANT = float(data['c_blend_distant']); updated.append('c_blend_distant')
+    # Mapping of JSON key -> (config attr, type, optional validator)
+    _map = {
+        # Search
+        'c_puct':              ('C_PUCT', float),
+        'sims':                ('NUM_SIMULATIONS', int),
+        'mcts_batch':          ('MCTS_BATCH_SIZE', int),
+        'dirichlet_alpha':     ('DIRICHLET_ALPHA', float),
+        'dirichlet_epsilon':   ('DIRICHLET_EPSILON', float),
+        'temp_threshold':      ('TEMP_THRESHOLD', int),
+        # Play style
+        'play_style':          ('PLAY_STYLE', str),
+        'c_blend_adjacent':    ('C_BLEND_ADJACENT', float),
+        'c_blend_distant':     ('C_BLEND_DISTANT', float),
+        'distant_explore_prob':('DISTANT_EXPLORE_PROB', float),
+        # Training
+        'batch_size':          ('BATCH_SIZE', int),
+        'lr':                  ('LEARNING_RATE', float),
+        'l2_reg':              ('L2_REG', float),
+        'buffer_size':         ('REPLAY_BUFFER_SIZE', int),
+        # Pipeline
+        'train_steps':         ('DEFAULT_TRAIN_STEPS', int),
+        'games_per_iter':      ('DEFAULT_GAMES_PER_ITER', int),
+        'checkpoint_every':    ('CHECKPOINT_EVERY', int),
+        'max_workers':         ('MAX_WORKERS', int),
+        'games_per_future':    ('GAMES_PER_FUTURE', int),
+        # ELO
+        'eval_every':          ('ELO_EVAL_EVERY', int),
+        'eval_games':          ('ELO_EVAL_GAMES', int),
+        'eval_sims':           ('ELO_EVAL_SIMS', int),
+        'max_opponents':       ('ELO_MAX_OPPONENTS', int),
+        'baseline_games':      ('ELO_BASELINE_GAMES', int),
+        'vault_max_models':    ('VAULT_MAX_MODELS', int),
+        # Curriculum / plateau
+        'plateau_threshold':   ('PLATEAU_THRESHOLD', int),
+        'plateau_iters':       ('PLATEAU_ITERS', int),
+        'plateau_sim_boost':   ('PLATEAU_SIM_BOOST', int),
+        # LR schedule
+        'cosine_t0':           ('COSINE_T0', int),
+        'cosine_t_mult':       ('COSINE_T_MULT', int),
+        'cosine_eta_min':      ('COSINE_ETA_MIN', float),
+        # Defensive
+        'blocking_priority_boost': ('BLOCKING_PRIORITY_BOOST', float),
+        'survival_priority_boost': ('SURVIVAL_PRIORITY_BOOST', float),
+        'use_ab_hybrid':       ('USE_AB_HYBRID', bool),
+        'ab_hybrid_depth':     ('AB_HYBRID_DEPTH', int),
+        # Mixed precision
+        'mixed_precision':     ('USE_MIXED_PRECISION', bool),
+        'grad_clip_norm':      ('GRAD_CLIP_NORM', float),
+    }
+    for key, (attr, typ) in _map.items():
+        if key in data:
+            val = data[key]
+            if typ is bool:
+                val = val if isinstance(val, bool) else str(val).lower() in ('true', '1')
+            else:
+                val = typ(val)
+            setattr(cfg, attr, val)
+            updated.append(key)
     return jsonify({'updated': updated, 'status': 'ok'})
 
 
@@ -1722,7 +1218,7 @@ header{border-bottom:1px solid #000;padding:14px 24px;display:flex;align-items:c
 .status{margin-left:auto;letter-spacing:3px;font-size:11px;font-weight:700}
 main{display:flex;flex:1;overflow:hidden}
 .left{width:50%;border-right:1px solid #000;padding:20px;display:flex;flex-direction:column;align-items:center;overflow:hidden}
-.right{width:50%;display:flex;flex-direction:column;overflow-y:auto}
+.right{width:50%;display:flex;flex-direction:column;overflow:hidden}
 .chart-box{padding:16px 20px;border-bottom:1px solid #000;display:flex;flex-direction:column}
 .chart-box:last-child{border-bottom:none}
 .chart-header{font-weight:700;letter-spacing:2px;font-size:10px;text-transform:uppercase;
@@ -1751,13 +1247,6 @@ footer span{white-space:nowrap}
 .progress-track{flex:1;height:6px;background:#eee;border-radius:3px;overflow:hidden}
 .progress-fill{height:100%;background:#000;width:0%;transition:width .2s}
 .progress-label{font:700 10px 'Courier New';min-width:120px;text-align:right}
-.settings-btn{cursor:pointer;font-size:18px;margin-left:12px;user-select:none}
-.settings-panel{position:absolute;top:42px;right:20px;background:#fff;border:1px solid #000;
-  padding:16px;z-index:100;font:11px 'SF Mono','Courier New',monospace;min-width:260px;box-shadow:2px 2px 0 #0001}
-.settings-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}
-.settings-row label{width:110px;font-weight:700;flex-shrink:0}
-.settings-row input[type=range]{flex:1;accent-color:#000}
-.settings-row span.val{width:50px;text-align:right;font-size:10px}
 .gh-item{cursor:pointer;padding:1px 3px;border-radius:2px;display:inline-block;margin:0 1px;font-size:8px}
 .gh-item:hover{background:#eee}
 .gh-item.active{background:#000;color:#fff}
@@ -1768,6 +1257,30 @@ footer span{white-space:nowrap}
 .overlay-toggles .obtn.active{background:#000;color:#fff}
 #value-chart-wrap{width:100%;height:60px;position:relative;margin-top:6px;border:1px solid #eee}
 #value-chart{position:absolute;top:0;left:0;width:100%;height:100%}
+.tab-bar{display:flex;border-bottom:1px solid #000;flex-shrink:0}
+.tab{padding:8px 20px;font:bold 10px 'SF Mono','Courier New',monospace;letter-spacing:2px;text-transform:uppercase;
+  cursor:pointer;user-select:none;border-right:1px solid #000;transition:background .15s}
+.tab:hover{background:#f5f5f5}
+.tab.active{background:#000;color:#fff}
+.cfg-section{margin-bottom:2px}
+.cfg-section-header{font:bold 10px 'SF Mono','Courier New',monospace;letter-spacing:2px;text-transform:uppercase;
+  cursor:pointer;user-select:none;padding:8px 0;display:flex;align-items:center;gap:6px;border-bottom:1px solid #eee}
+.cfg-section-header .toggle{font-size:8px;transition:transform .15s}
+.cfg-section-header .toggle.collapsed{transform:rotate(-90deg)}
+.cfg-section-body{padding:8px 0 4px 0;transition:max-height .25s ease,opacity .2s ease;overflow:hidden}
+.cfg-section-body.collapsed{max-height:0!important;opacity:0;padding:0}
+.cfg-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.cfg-row label{width:130px;font:bold 11px 'SF Mono','Courier New',monospace;flex-shrink:0}
+.cfg-row input[type=number]{width:100px;font:12px 'SF Mono','Courier New',monospace;border:1px solid #ccc;
+  padding:3px 6px;background:#fafafa;outline:none}
+.cfg-row input[type=number]:focus{border-color:#000;background:#fff}
+.cfg-row input[type=checkbox]{accent-color:#000;width:16px;height:16px}
+.cfg-row select{font:12px 'SF Mono','Courier New',monospace;border:1px solid #ccc;padding:3px 6px;background:#fafafa;outline:none}
+.cfg-row select:focus{border-color:#000;background:#fff}
+.cfg-row input[type=range]{flex:1;accent-color:#000}
+.cfg-row span.val{width:50px;text-align:right;font-size:10px}
+.cfg-ro{font:12px 'SF Mono','Courier New',monospace;color:#666}
+.cfg-hint{font:10px 'SF Mono','Courier New',monospace;color:#999;margin:-2px 0 8px 0}
 </style>
 </head>
 <body>
@@ -1775,39 +1288,8 @@ footer span{white-space:nowrap}
   <span class="title">Hex Bot Training</span>
   <button id="btn-start" onclick="startTraining()" style="background:#000;color:#fff;border:none;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9654;</button><button id="btn-stop" onclick="stopTraining()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9632;</button><span class="status" id="status">IDLE</span>
   <span class="conn-dot" id="conn-dot" style="background:#ccc" title="Disconnected"></span>
-  <span class="settings-btn" onclick="toggleSettings()">&#9881;</span>
+
 </header>
-<div id="settings-panel" class="settings-panel" style="display:none">
-  <div style="font-weight:700;margin-bottom:12px;letter-spacing:2px;font-size:10px;text-transform:uppercase">Settings</div>
-  <div class="settings-row">
-    <label>Replay speed</label>
-    <input type="range" id="set-speed" min="50" max="500" value="120" step="10"
-      oninput="saveSetting('replaySpeed',+this.value);el('set-speed-val').textContent=this.value+'ms'">
-    <span class="val" id="set-speed-val">120ms</span>
-  </div>
-  <div class="settings-row">
-    <label>Dot size</label>
-    <input type="range" id="set-dotsize" min="1" max="5" value="2" step="0.5"
-      oninput="saveSetting('dotSize',+this.value);el('set-dotsize-val').textContent=this.value;drawHex()">
-    <span class="val" id="set-dotsize-val">2</span>
-  </div>
-  <div class="settings-row">
-    <label>Grid radius</label>
-    <input type="range" id="set-radius" min="1" max="4" value="2" step="1"
-      oninput="saveSetting('emptyHexRadius',+this.value);el('set-radius-val').textContent=this.value;drawHex()">
-    <span class="val" id="set-radius-val">2</span>
-  </div>
-  <div class="settings-row">
-    <label>Move numbers</label>
-    <input type="checkbox" id="set-movenums" checked
-      onchange="saveSetting('showMoveNums',this.checked);drawHex()">
-  </div>
-  <div class="settings-row">
-    <label>Auto-refresh</label>
-    <input type="checkbox" id="set-autorefresh" checked
-      onchange="saveSetting('autoRefresh',this.checked)">
-  </div>
-</div>
 <main>
   <div class="left">
     <div id="live-stats">
@@ -1849,52 +1331,214 @@ footer span{white-space:nowrap}
     </div>
   </div>
   <div class="right">
-    <div class="chart-box" id="box-elo">
-      <div class="chart-header" onclick="toggleChart('elo')">
-        <span class="toggle" id="tog-elo">&#9660;</span> Elo Progression
+    <div class="tab-bar">
+      <span class="tab active" data-tab="charts" onclick="switchTab('charts')">Charts</span>
+      <span class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</span>
+    </div>
+    <div id="tab-charts" class="tab-content" style="display:flex;flex-direction:column;overflow-y:auto;flex:1">
+      <div class="chart-box" id="box-elo">
+        <div class="chart-header" onclick="toggleChart('elo')">
+          <span class="toggle" id="tog-elo">&#9660;</span> Elo Progression
+        </div>
+        <div class="chart-body" id="body-elo">
+          <div class="canvas-wrap"><canvas id="elo-chart"></canvas></div>
+        </div>
       </div>
-      <div class="chart-body" id="body-elo">
-        <div class="canvas-wrap"><canvas id="elo-chart"></canvas></div>
+      <div class="chart-box" id="box-loss">
+        <div class="chart-header" onclick="toggleChart('loss')">
+          <span class="toggle" id="tog-loss">&#9660;</span> Loss Curves
+        </div>
+        <div class="chart-body" id="body-loss">
+          <div class="canvas-wrap"><canvas id="loss-chart"></canvas></div>
+        </div>
+      </div>
+      <div class="chart-box" id="box-winrate">
+        <div class="chart-header" onclick="toggleChart('winrate')">
+          <span class="toggle" id="tog-winrate">&#9660;</span> Win Rates
+        </div>
+        <div class="chart-body" id="body-winrate">
+          <div class="canvas-wrap"><canvas id="winrate-chart"></canvas></div>
+        </div>
+      </div>
+      <div class="chart-box" id="box-gamelength">
+        <div class="chart-header" onclick="toggleChart('gamelength')">
+          <span class="toggle" id="tog-gamelength">&#9660;</span> Game Length
+        </div>
+        <div class="chart-body" id="body-gamelength">
+          <div class="canvas-wrap"><canvas id="gamelength-chart"></canvas></div>
+        </div>
+      </div>
+      <div class="chart-box" id="box-speed">
+        <div class="chart-header" onclick="toggleChart('speed')">
+          <span class="toggle" id="tog-speed">&#9660;</span> Training Speed
+        </div>
+        <div class="chart-body" id="body-speed">
+          <div class="canvas-wrap"><canvas id="speed-chart"></canvas></div>
+        </div>
+      </div>
+      <div class="chart-box" id="box-resources">
+        <div class="chart-header" onclick="toggleChart('resources')">
+          <span class="toggle" id="tog-resources">&#9660;</span> Resources (CPU / RAM)
+        </div>
+        <div class="chart-body" id="body-resources">
+          <div class="canvas-wrap" style="min-height:140px;height:140px"><canvas id="res-chart"></canvas></div>
+        </div>
       </div>
     </div>
-    <div class="chart-box" id="box-loss">
-      <div class="chart-header" onclick="toggleChart('loss')">
-        <span class="toggle" id="tog-loss">&#9660;</span> Loss Curves
+    <div id="tab-settings" class="tab-content" style="display:none;overflow-y:auto;flex:1;padding:16px 20px">
+      <div id="cfg-status" style="font:bold 10px 'SF Mono',monospace;color:#090;min-height:16px;margin-bottom:8px"></div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Network
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Board size</label><span class="cfg-ro" id="cfg-board_size">19</span></div>
+          <div class="cfg-row"><label>Input channels</label><span class="cfg-ro" id="cfg-num_channels">7</span></div>
+          <div class="cfg-row"><label>Filters</label><span class="cfg-ro" id="cfg-filters">128</span></div>
+          <div class="cfg-row"><label>Res blocks</label><span class="cfg-ro" id="cfg-res_blocks">12</span></div>
+          <div class="cfg-hint">Network architecture is read-only (set via --config at launch)</div>
+        </div>
       </div>
-      <div class="chart-body" id="body-loss">
-        <div class="canvas-wrap"><canvas id="loss-chart"></canvas></div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Search (MCTS)
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>C PUCT</label><input type="number" id="cfg-c_puct" step="0.1" min="0.1" max="10" onchange="cfgUpdate('c_puct',+this.value)"></div>
+          <div class="cfg-row"><label>Simulations</label><input type="number" id="cfg-sims" step="10" min="10" max="1600" onchange="cfgUpdate('sims',+this.value)"></div>
+          <div class="cfg-row"><label>MCTS batch</label><input type="number" id="cfg-mcts_batch" step="8" min="1" max="512" onchange="cfgUpdate('mcts_batch',+this.value)"></div>
+          <div class="cfg-row"><label>Dirichlet alpha</label><input type="number" id="cfg-dirichlet_alpha" step="0.01" min="0.01" max="1" onchange="cfgUpdate('dirichlet_alpha',+this.value)"></div>
+          <div class="cfg-row"><label>Dirichlet epsilon</label><input type="number" id="cfg-dirichlet_epsilon" step="0.05" min="0" max="1" onchange="cfgUpdate('dirichlet_epsilon',+this.value)"></div>
+          <div class="cfg-row"><label>Temp threshold</label><input type="number" id="cfg-temp_threshold" step="1" min="0" max="100" onchange="cfgUpdate('temp_threshold',+this.value)"></div>
+        </div>
       </div>
-    </div>
-    <div class="chart-box" id="box-winrate">
-      <div class="chart-header" onclick="toggleChart('winrate')">
-        <span class="toggle" id="tog-winrate">&#9660;</span> Win Rates
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Training
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Batch size</label><input type="number" id="cfg-batch_size" step="64" min="32" max="4096" onchange="cfgUpdate('batch_size',+this.value)"></div>
+          <div class="cfg-row"><label>Learning rate</label><input type="number" id="cfg-lr" step="0.0001" min="0.00001" max="0.1" onchange="cfgUpdate('lr',+this.value)"></div>
+          <div class="cfg-row"><label>L2 reg</label><input type="number" id="cfg-l2_reg" step="0.00001" min="0" max="0.01" onchange="cfgUpdate('l2_reg',+this.value)"></div>
+          <div class="cfg-row"><label>Buffer size</label><input type="number" id="cfg-buffer_size" step="50000" min="10000" max="2000000" onchange="cfgUpdate('buffer_size',+this.value)"></div>
+        </div>
       </div>
-      <div class="chart-body" id="body-winrate">
-        <div class="canvas-wrap"><canvas id="winrate-chart"></canvas></div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Pipeline
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Train steps</label><input type="number" id="cfg-train_steps" step="10" min="10" max="2000" onchange="cfgUpdate('train_steps',+this.value)"></div>
+          <div class="cfg-row"><label>Games / iter</label><input type="number" id="cfg-games_per_iter" step="5" min="1" max="500" onchange="cfgUpdate('games_per_iter',+this.value)"></div>
+          <div class="cfg-row"><label>Checkpoint every</label><input type="number" id="cfg-checkpoint_every" step="1" min="1" max="100" onchange="cfgUpdate('checkpoint_every',+this.value)"></div>
+          <div class="cfg-row"><label>Max workers</label><input type="number" id="cfg-max_workers" step="1" min="1" max="32" onchange="cfgUpdate('max_workers',+this.value)"></div>
+          <div class="cfg-row"><label>Games / future</label><input type="number" id="cfg-games_per_future" step="1" min="1" max="10" onchange="cfgUpdate('games_per_future',+this.value)"></div>
+        </div>
       </div>
-    </div>
-    <div class="chart-box" id="box-gamelength">
-      <div class="chart-header" onclick="toggleChart('gamelength')">
-        <span class="toggle" id="tog-gamelength">&#9660;</span> Game Length
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> ELO Evaluation
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Eval every</label><input type="number" id="cfg-eval_every" step="1" min="1" max="50" onchange="cfgUpdate('eval_every',+this.value)"></div>
+          <div class="cfg-row"><label>Eval games</label><input type="number" id="cfg-eval_games" step="1" min="1" max="50" onchange="cfgUpdate('eval_games',+this.value)"></div>
+          <div class="cfg-row"><label>Eval sims</label><input type="number" id="cfg-eval_sims" step="5" min="5" max="400" onchange="cfgUpdate('eval_sims',+this.value)"></div>
+          <div class="cfg-row"><label>Max opponents</label><input type="number" id="cfg-max_opponents" step="1" min="1" max="20" onchange="cfgUpdate('max_opponents',+this.value)"></div>
+          <div class="cfg-row"><label>Baseline games</label><input type="number" id="cfg-baseline_games" step="1" min="0" max="20" onchange="cfgUpdate('baseline_games',+this.value)"></div>
+          <div class="cfg-row"><label>Vault max models</label><input type="number" id="cfg-vault_max_models" step="10" min="10" max="1000" onchange="cfgUpdate('vault_max_models',+this.value)"></div>
+        </div>
       </div>
-      <div class="chart-body" id="body-gamelength">
-        <div class="canvas-wrap"><canvas id="gamelength-chart"></canvas></div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Play Style
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Style</label>
+            <select id="cfg-play_style" onchange="cfgUpdate('play_style',this.value)">
+              <option value="distant">distant</option>
+              <option value="close">close</option>
+            </select>
+          </div>
+          <div class="cfg-row"><label>C blend adjacent</label><input type="number" id="cfg-c_blend_adjacent" step="0.01" min="0" max="1" onchange="cfgUpdate('c_blend_adjacent',+this.value)"></div>
+          <div class="cfg-row"><label>C blend distant</label><input type="number" id="cfg-c_blend_distant" step="0.01" min="0" max="1" onchange="cfgUpdate('c_blend_distant',+this.value)"></div>
+          <div class="cfg-row"><label>Explore prob</label><input type="number" id="cfg-distant_explore_prob" step="0.05" min="0" max="1" onchange="cfgUpdate('distant_explore_prob',+this.value)"></div>
+        </div>
       </div>
-    </div>
-    <div class="chart-box" id="box-speed">
-      <div class="chart-header" onclick="toggleChart('speed')">
-        <span class="toggle" id="tog-speed">&#9660;</span> Training Speed
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Curriculum / Plateau
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Plateau threshold</label><input type="number" id="cfg-plateau_threshold" step="1" min="1" max="100" onchange="cfgUpdate('plateau_threshold',+this.value)"></div>
+          <div class="cfg-row"><label>Plateau iters</label><input type="number" id="cfg-plateau_iters" step="1" min="1" max="50" onchange="cfgUpdate('plateau_iters',+this.value)"></div>
+          <div class="cfg-row"><label>Plateau sim boost</label><input type="number" id="cfg-plateau_sim_boost" step="10" min="0" max="200" onchange="cfgUpdate('plateau_sim_boost',+this.value)"></div>
+        </div>
       </div>
-      <div class="chart-body" id="body-speed">
-        <div class="canvas-wrap"><canvas id="speed-chart"></canvas></div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> LR Schedule
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Cosine T0</label><input type="number" id="cfg-cosine_t0" step="5" min="5" max="500" onchange="cfgUpdate('cosine_t0',+this.value)"></div>
+          <div class="cfg-row"><label>Cosine T mult</label><input type="number" id="cfg-cosine_t_mult" step="1" min="1" max="10" onchange="cfgUpdate('cosine_t_mult',+this.value)"></div>
+          <div class="cfg-row"><label>Cosine eta min</label><input type="number" id="cfg-cosine_eta_min" step="0.00001" min="0" max="0.01" onchange="cfgUpdate('cosine_eta_min',+this.value)"></div>
+        </div>
       </div>
-    </div>
-    <div class="chart-box" id="box-resources">
-      <div class="chart-header" onclick="toggleChart('resources')">
-        <span class="toggle" id="tog-resources">&#9660;</span> Resources (CPU / RAM)
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Defensive Training
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Blocking boost</label><input type="number" id="cfg-blocking_priority_boost" step="0.5" min="0" max="10" onchange="cfgUpdate('blocking_priority_boost',+this.value)"></div>
+          <div class="cfg-row"><label>Survival boost</label><input type="number" id="cfg-survival_priority_boost" step="0.5" min="0" max="10" onchange="cfgUpdate('survival_priority_boost',+this.value)"></div>
+          <div class="cfg-row"><label>AB hybrid</label><input type="checkbox" id="cfg-use_ab_hybrid" onchange="cfgUpdate('use_ab_hybrid',this.checked)"></div>
+          <div class="cfg-row"><label>AB depth</label><input type="number" id="cfg-ab_hybrid_depth" step="1" min="0" max="12" onchange="cfgUpdate('ab_hybrid_depth',+this.value)"></div>
+        </div>
       </div>
-      <div class="chart-body" id="body-resources">
-        <div class="canvas-wrap" style="min-height:140px;height:140px"><canvas id="res-chart"></canvas></div>
+
+      <div class="cfg-section">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Mixed Precision
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Enabled</label><input type="checkbox" id="cfg-mixed_precision" onchange="cfgUpdate('mixed_precision',this.checked)"></div>
+          <div class="cfg-row"><label>Grad clip norm</label><input type="number" id="cfg-grad_clip_norm" step="0.1" min="0" max="10" onchange="cfgUpdate('grad_clip_norm',+this.value)"></div>
+          <div class="cfg-hint">Mixed precision only effective on CUDA with Tensor Cores</div>
+        </div>
+      </div>
+
+      <div class="cfg-section" style="margin-top:16px;border-top:1px solid #eee;padding-top:12px">
+        <div class="cfg-section-header" onclick="toggleCfgSection(this)">
+          <span class="toggle">&#9660;</span> Display
+        </div>
+        <div class="cfg-section-body">
+          <div class="cfg-row"><label>Replay speed</label>
+            <input type="range" id="set-speed" min="50" max="500" value="120" step="10"
+              oninput="saveSetting('replaySpeed',+this.value);el('set-speed-val').textContent=this.value+'ms'">
+            <span class="val" id="set-speed-val">120ms</span>
+          </div>
+          <div class="cfg-row"><label>Dot size</label>
+            <input type="range" id="set-dotsize" min="1" max="5" value="2" step="0.5"
+              oninput="saveSetting('dotSize',+this.value);el('set-dotsize-val').textContent=this.value;drawHex()">
+            <span class="val" id="set-dotsize-val">2</span>
+          </div>
+          <div class="cfg-row"><label>Grid radius</label>
+            <input type="range" id="set-radius" min="1" max="4" value="2" step="1"
+              oninput="saveSetting('emptyHexRadius',+this.value);el('set-radius-val').textContent=this.value;drawHex()">
+            <span class="val" id="set-radius-val">2</span>
+          </div>
+          <div class="cfg-row"><label>Move numbers</label><input type="checkbox" id="set-movenums" checked onchange="saveSetting('showMoveNums',this.checked);drawHex()"></div>
+          <div class="cfg-row"><label>Auto-refresh</label><input type="checkbox" id="set-autorefresh" checked onchange="saveSetting('autoRefresh',this.checked)"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -1936,9 +1580,13 @@ socket.on('training_complete', () => {
 
 // --- Start / Stop training ---
 function startTraining() {
+  const gpi = el('cfg-games_per_iter'), ts = el('cfg-train_steps');
+  const body = {};
+  if (gpi && gpi.value) body.games_per_iter = +gpi.value;
+  if (ts && ts.value) body.train_steps = +ts.value;
   fetch('/api/train/start', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({})
+    body: JSON.stringify(body)
   }).then(r => r.json()).then(d => {
     el('status').textContent = d.status === 'started' ? 'STARTING...' : 'ALREADY RUNNING';
   });
@@ -1950,33 +1598,88 @@ function stopTraining() {
 }
 
 // --- Training config ---
-function updateConfig(key, value) {
+function cfgUpdate(key, value) {
   const body = {}; body[key] = value;
   fetch('/api/config', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   }).then(r => r.json()).then(d => {
     const s = el('cfg-status');
-    if (s) s.textContent = 'Updated: ' + d.updated.join(', ');
-    setTimeout(() => { if (s) s.textContent = ''; }, 3000);
+    if (s) { s.textContent = 'Updated: ' + d.updated.join(', '); setTimeout(() => { s.textContent = ''; }, 3000); }
   });
+}
+function cfgSet(id, val) {
+  const e = el(id);
+  if (!e) return;
+  if (e.type === 'checkbox') e.checked = !!val;
+  else e.value = val;
 }
 function loadConfig() {
   fetch('/api/config').then(r => r.json()).then(d => {
+    if (d.network) {
+      ['board_size','num_channels','filters','res_blocks'].forEach(k => {
+        const s = el('cfg-' + k); if (s && s.tagName === 'SPAN') s.textContent = d.network[k];
+      });
+    }
     if (d.search) {
-      if (el('cfg-sims')) el('cfg-sims').value = d.search.sims;
-      if (el('cfg-dirichlet')) el('cfg-dirichlet').value = d.search.dirichlet_alpha;
-      if (el('cfg-temp')) el('cfg-temp').value = d.search.temp_threshold;
+      cfgSet('cfg-c_puct', d.search.c_puct); cfgSet('cfg-sims', d.search.sims);
+      cfgSet('cfg-mcts_batch', d.search.mcts_batch); cfgSet('cfg-dirichlet_alpha', d.search.dirichlet_alpha);
+      cfgSet('cfg-dirichlet_epsilon', d.search.dirichlet_epsilon); cfgSet('cfg-temp_threshold', d.search.temp_threshold);
     }
     if (d.training) {
-      if (el('cfg-batch')) el('cfg-batch').value = d.training.batch_size;
-      if (el('cfg-lr')) el('cfg-lr').value = d.training.lr;
+      cfgSet('cfg-batch_size', d.training.batch_size); cfgSet('cfg-lr', d.training.lr);
+      cfgSet('cfg-l2_reg', d.training.l2_reg); cfgSet('cfg-buffer_size', d.training.buffer_size);
+    }
+    if (d.pipeline) {
+      cfgSet('cfg-train_steps', d.pipeline.train_steps); cfgSet('cfg-games_per_iter', d.pipeline.games_per_iter);
+      cfgSet('cfg-checkpoint_every', d.pipeline.checkpoint_every); cfgSet('cfg-max_workers', d.pipeline.max_workers);
+      cfgSet('cfg-games_per_future', d.pipeline.games_per_future);
+    }
+    if (d.elo) {
+      cfgSet('cfg-eval_every', d.elo.eval_every); cfgSet('cfg-eval_games', d.elo.eval_games);
+      cfgSet('cfg-eval_sims', d.elo.eval_sims); cfgSet('cfg-max_opponents', d.elo.max_opponents);
+      cfgSet('cfg-baseline_games', d.elo.baseline_games); cfgSet('cfg-vault_max_models', d.elo.vault_max_models);
     }
     if (d.play_style) {
-      if (el('cfg-playstyle')) el('cfg-playstyle').value = d.play_style.style;
+      cfgSet('cfg-play_style', d.play_style.style); cfgSet('cfg-c_blend_adjacent', d.play_style.c_blend_adjacent);
+      cfgSet('cfg-c_blend_distant', d.play_style.c_blend_distant); cfgSet('cfg-distant_explore_prob', d.play_style.distant_explore_prob);
+    }
+    if (d.curriculum) {
+      cfgSet('cfg-plateau_threshold', d.curriculum.plateau_threshold);
+      cfgSet('cfg-plateau_iters', d.curriculum.plateau_iters); cfgSet('cfg-plateau_sim_boost', d.curriculum.plateau_sim_boost);
+    }
+    if (d.lr_schedule) {
+      cfgSet('cfg-cosine_t0', d.lr_schedule.cosine_t0); cfgSet('cfg-cosine_t_mult', d.lr_schedule.cosine_t_mult);
+      cfgSet('cfg-cosine_eta_min', d.lr_schedule.cosine_eta_min);
+    }
+    if (d.defensive) {
+      cfgSet('cfg-blocking_priority_boost', d.defensive.blocking_priority_boost);
+      cfgSet('cfg-survival_priority_boost', d.defensive.survival_priority_boost);
+      cfgSet('cfg-use_ab_hybrid', d.defensive.use_ab_hybrid); cfgSet('cfg-ab_hybrid_depth', d.defensive.ab_hybrid_depth);
+    }
+    if (d.mixed_precision) {
+      cfgSet('cfg-mixed_precision', d.mixed_precision.enabled); cfgSet('cfg-grad_clip_norm', d.mixed_precision.grad_clip_norm);
     }
   }).catch(() => {});
 }
+
+// --- Tab switching ---
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab-content').forEach(tc => tc.style.display = 'none');
+  const target = el('tab-' + name);
+  if (target) target.style.display = name === 'charts' ? 'flex' : 'block';
+  if (name === 'settings') loadConfig();
+}
+
+// --- Config section collapse ---
+function toggleCfgSection(header) {
+  const body = header.nextElementSibling;
+  const tog = header.querySelector('.toggle');
+  if (body) body.classList.toggle('collapsed');
+  if (tog) tog.classList.toggle('collapsed');
+}
+
 setTimeout(loadConfig, 500);
 </script>
 <script>
@@ -2128,11 +1831,6 @@ const defaultSettings = { replaySpeed: 120, dotSize: 2, emptyHexRadius: 2, autoR
 let settings = Object.assign({}, defaultSettings);
 try { const s = JSON.parse(localStorage.getItem('hexdash_settings')); if (s) Object.assign(settings, s); } catch(e) {}
 function saveSetting(key, val) { settings[key] = val; localStorage.setItem('hexdash_settings', JSON.stringify(settings)); }
-function toggleSettings() {
-  const p = el('settings-panel');
-  p.style.display = p.style.display === 'none' ? '' : 'none';
-}
-
 function axToPixel(q, r) {
   return [HEX_SIZE * (S3 * q + S3 / 2 * r), HEX_SIZE * (1.5 * r)];
 }
@@ -2742,50 +2440,7 @@ socket.on('training_complete', () => {
   el('status').textContent = 'COMPLETE';
 });
 
-// --- Start / Stop training ---
-function startTraining() {
-  fetch('/api/train/start', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({})
-  }).then(r => r.json()).then(d => {
-    el('status').textContent = d.status === 'started' ? 'STARTING...' : 'ALREADY RUNNING';
-  });
-}
-function stopTraining() {
-  fetch('/api/train/stop', { method: 'POST' }).then(() => {
-    el('status').textContent = 'STOPPING...';
-  });
-}
 
-// --- Training config ---
-function updateConfig(key, value) {
-  const body = {}; body[key] = value;
-  fetch('/api/config', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  }).then(r => r.json()).then(d => {
-    const s = el('cfg-status');
-    if (s) s.textContent = 'Updated: ' + d.updated.join(', ');
-    setTimeout(() => { if (s) s.textContent = ''; }, 3000);
-  });
-}
-function loadConfig() {
-  fetch('/api/config').then(r => r.json()).then(d => {
-    if (d.search) {
-      if (el('cfg-sims')) el('cfg-sims').value = d.search.sims;
-      if (el('cfg-dirichlet')) el('cfg-dirichlet').value = d.search.dirichlet_alpha;
-      if (el('cfg-temp')) el('cfg-temp').value = d.search.temp_threshold;
-    }
-    if (d.training) {
-      if (el('cfg-batch')) el('cfg-batch').value = d.training.batch_size;
-      if (el('cfg-lr')) el('cfg-lr').value = d.training.lr;
-    }
-    if (d.play_style) {
-      if (el('cfg-playstyle')) el('cfg-playstyle').value = d.play_style.style;
-    }
-  }).catch(() => {});
-}
-setTimeout(loadConfig, 500);
 </script>
 </body>
 </html>
