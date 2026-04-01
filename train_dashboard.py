@@ -225,7 +225,7 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
     if use_alphabeta:
         searcher = BatchedNNAlphaBeta(net, depth=ab_depth, nn_depth=5)
     else:
-        searcher = BatchedMCTS(net, num_simulations=num_sims, batch_size=32)
+        searcher = BatchedMCTS(net, num_simulations=num_sims, batch_size=64)
 
     pid = _os.getpid()
     print(f'  │  [Worker {pid}] loaded in {t_load:.1f}s, playing {games} games ({num_sims} sims)')
