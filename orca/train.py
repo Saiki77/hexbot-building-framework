@@ -1167,20 +1167,15 @@ class OrcaTrainer:
         The C engine game logic runs on CPU threads while NN inference
         is batched on GPU. 5-10x faster than process-based on CUDA.
         """
-        from orca.gpu_server import GPUInferenceServer
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from orca.data import self_play_game_v2
-
-        print(f"  |  Self-play: GPU-accelerated (CUDA + {self.num_workers} threads, "
-              f"{current_sims} sims)...")
-
-        # Network stays on GPU - shared by all threads via inference server
-        self.net.eval()
-        server = GPUInferenceServer(self.net, device=str(self.device), batch_size=64)
-        server.start()
-
-        # Create MCTS that uses the main network (shared, thread-safe via server)
         from orca.search import BatchedMCTS
+
+        print(f"  |  Self-play: threaded ({self.device}, "
+              f"{self.num_workers} threads, {current_sims} sims)...")
+
+        # Network stays on GPU - shared by all threads (no per-worker loading)
+        self.net.eval()
         mcts = BatchedMCTS(self.net, num_simulations=current_sims, batch_size=64)
 
         total_samples = 0
@@ -1229,11 +1224,6 @@ class OrcaTrainer:
                         [list(m) for m in moves],
                         result_val, len(samples),
                         analysis_data=ana_data)
-
-        server.stop()
-        print(f"  |  GPU server: {server.total_evaluations} evals, "
-              f"{server.total_batches} batches, "
-              f"avg batch={server.avg_batch_size:.1f}")
 
         return {
             "game_idx": game_idx,

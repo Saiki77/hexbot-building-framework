@@ -264,7 +264,7 @@ def bench_search() -> Dict:
 # ---------------------------------------------------------------------------
 
 def bench_gpu_selfplay(n_games=3) -> Dict:
-    """GPU-accelerated self-play with shared inference server."""
+    """Threaded self-play with shared GPU network (no process spawn overhead)."""
     import torch
     from bot import get_device
 
@@ -272,19 +272,17 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
     if device.type == 'cpu':
         return {'skipped': True, 'reason': 'CPU only (no GPU)'}
 
-    from orca.gpu_server import GPUInferenceServer
     from orca.search import BatchedMCTS
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    import io, contextlib, threading
+    import io, contextlib
 
     with contextlib.redirect_stdout(io.StringIO()):
         from orca.data import self_play_game_v2
 
     net, loaded = _load_checkpoint_net(device)
-    server = GPUInferenceServer(net, device=str(device), batch_size=64)
-    server.start()
     mcts = BatchedMCTS(net, num_simulations=50, batch_size=64)
 
+    # Measure wall-clock time for all games (parallel)
     times = []
     lengths = []
 
@@ -294,29 +292,27 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
             samples, moves, *_ = self_play_game_v2(net, mcts)
         return time.perf_counter() - t0, len(moves)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    wall_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=min(4, n_games)) as pool:
         futs = [pool.submit(_play, i) for i in range(n_games)]
         for f in as_completed(futs):
             try:
                 t, l = f.result()
                 times.append(t)
                 lengths.append(l)
-            except Exception:
+            except Exception as e:
                 pass
 
-    server.stop()
-    total = sum(times)
+    wall_time = time.perf_counter() - wall_start
     n = len(times)
     return {
         'games': n,
-        'total_time': total,
-        'avg_time_per_game': total / max(n, 1),
-        'games_per_hour': n / total * 3600 if total > 0 else 0,
+        'wall_time': wall_time,
+        'avg_time_per_game': sum(times) / max(n, 1),
+        'games_per_hour': n / wall_time * 3600 if wall_time > 0 else 0,
+        'throughput_factor': (n / wall_time) / (1 / (sum(times) / max(n, 1))) if times else 0,
         'avg_game_length': sum(lengths) / max(n, 1),
         'checkpoint_loaded': loaded,
-        'gpu_evals': server.total_evaluations,
-        'gpu_batches': server.total_batches,
-        'avg_batch_size': server.avg_batch_size,
     }
 
 
@@ -550,13 +546,13 @@ def print_report(results: Dict, device_info: Dict):
     if 'gpu_selfplay' in results:
         gsp = results['gpu_selfplay']
         if gsp.get('skipped'):
-            print(f"|  GPU SELF-PLAY: skipped ({gsp.get('reason', 'no GPU')})".ljust(W - 1) + "|")
+            print(f"|  THREADED SELF-PLAY: skipped ({gsp.get('reason', 'no GPU')})".ljust(W - 1) + "|")
         else:
             ckpt = "checkpoint" if gsp.get('checkpoint_loaded') else "random weights"
-            dev = results.get('nn', {}).get('device', '?')
-            print(f"|  GPU SELF-PLAY (50 sims, threaded, {dev}, {ckpt})".ljust(W - 1) + "|")
+            factor = gsp.get('throughput_factor', 0)
+            print(f"|  THREADED SELF-PLAY (50 sims, shared GPU, {ckpt})".ljust(W - 1) + "|")
             print(f"|    {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} moves  {gsp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
-            print(f"|    GPU: {gsp.get('gpu_evals', 0)} evals, avg batch={gsp.get('avg_batch_size', 0):.1f}".ljust(W - 1) + "|")
+            print(f"|    wall={gsp['wall_time']:.1f}s for {gsp['games']} games  parallelism={factor:.1f}x".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
     # Training
@@ -653,10 +649,10 @@ Examples:
         elif section == 'search':
             results['search'] = bench_search()
         elif section == 'selfplay':
-            n = 1 if args.quick else 3
+            n = 3 if args.quick else 10
             results['selfplay'] = bench_selfplay(n)
         elif section == 'gpu_selfplay':
-            n = 1 if args.quick else 3
+            n = 3 if args.quick else 10
             results['gpu_selfplay'] = bench_gpu_selfplay(n)
         elif section == 'training':
             n = 5 if args.quick else 20
