@@ -1284,6 +1284,21 @@ footer span{white-space:nowrap}
 .cfg-row span.val{width:50px;text-align:right;font-size:10px}
 .cfg-ro{font:12px 'SF Mono','Courier New',monospace;color:#666}
 .cfg-hint{font:10px 'SF Mono','Courier New',monospace;color:#999;margin:-2px 0 8px 0}
+body.dark{background:#111;color:#ddd;filter:invert(1) hue-rotate(180deg)}
+body.dark canvas,body.dark img{filter:invert(1) hue-rotate(180deg)}
+body.dark header{border-color:#444}
+body.dark .left{border-color:#444}
+body.dark footer{border-color:#444}
+body.dark .chart-box{border-color:#333}
+body.dark .tab.active{background:#ddd;color:#111}
+body.dark .cfg-section-header{border-color:#333}
+#lights-out-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:#000;z-index:9999;
+  align-items:center;justify-content:center;flex-direction:column;gap:20px}
+#lights-out-overlay.active{display:flex}
+#lights-out-btn{font:bold 12px 'SF Mono','Courier New',monospace;padding:12px 32px;border:2px solid #333;
+  background:#111;color:#555;cursor:pointer;letter-spacing:3px;text-transform:uppercase;transition:all .2s}
+#lights-out-btn:hover{border-color:#fff;color:#fff}
+#lights-out-status{font:10px 'SF Mono','Courier New',monospace;color:#333;letter-spacing:2px}
 </style>
 </head>
 <body>
@@ -1542,6 +1557,8 @@ footer span{white-space:nowrap}
           </div>
           <div class="cfg-row"><label title="Show move order numbers on each stone">Move numbers</label><input type="checkbox" id="set-movenums" checked onchange="saveSetting('showMoveNums',this.checked);drawHex()"></div>
           <div class="cfg-row"><label title="Auto-refresh charts after each iteration completes">Auto-refresh</label><input type="checkbox" id="set-autorefresh" checked onchange="saveSetting('autoRefresh',this.checked)"></div>
+          <div class="cfg-row"><label title="Invert all colors (dark mode)">Dark mode</label><input type="checkbox" id="set-darkmode" onchange="toggleDarkMode(this.checked)"></div>
+          <div class="cfg-row"><label title="Turn everything black except one button to undo">Lights out</label><button onclick="lightsOut()" style="font:bold 10px 'SF Mono',monospace;padding:3px 10px;border:1px solid #000;background:#000;color:#fff;cursor:pointer">LIGHTS OUT</button></div>
         </div>
       </div>
     </div>
@@ -2446,8 +2463,48 @@ socket.on('training_complete', () => {
   el('status').textContent = 'COMPLETE';
 });
 
+// Update lights-out status with live info
+socket.on('iteration_complete', d => {
+  const lo = el('lights-out-status');
+  if (lo && d.iteration != null) {
+    lo.textContent = 'ITER ' + d.iteration + (d.elo ? ' | ELO ' + Math.round(d.elo) : '');
+  }
+});
+
+// --- Dark mode ---
+function toggleDarkMode(on) {
+  document.body.classList.toggle('dark', on);
+  saveSetting('darkMode', on);
+  // Re-render charts and hex since filter inverts colors
+  try { drawHex(); fetchCharts(); } catch(e) {}
+}
+
+// --- Lights out: black screen with minimal status ---
+function lightsOut() {
+  // Temporarily remove dark mode filter so overlay is pure black
+  document.body.classList.remove('dark');
+  const ov = el('lights-out-overlay');
+  if (ov) ov.classList.add('active');
+}
+function lightsOff() {
+  const ov = el('lights-out-overlay');
+  if (ov) ov.classList.remove('active');
+  // Restore dark mode if it was on
+  if (settings.darkMode) document.body.classList.add('dark');
+}
+
+// Restore dark mode on load
+if (settings.darkMode) {
+  document.body.classList.add('dark');
+  const cb = el('set-darkmode');
+  if (cb) cb.checked = true;
+}
 
 </script>
+<div id="lights-out-overlay">
+  <span id="lights-out-status">TRAINING IN PROGRESS</span>
+  <button id="lights-out-btn" onclick="lightsOff()">LIGHTS ON</button>
+</div>
 </body>
 </html>
 """
