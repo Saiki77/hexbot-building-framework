@@ -1558,7 +1558,8 @@ footer span{white-space:nowrap}
   <span class="res-bar">RAM <div class="res-meter"><div class="res-meter-fill" id="ram-fill" style="width:0%"></div></div> <b id="s-ram">0</b>%</span>
 </footer>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+<script>
 // --- Train dashboard extra events ---
 socket.on('iteration_start', d => {
   el('status').textContent = 'ITER ' + d.iteration + '/' + d.total;
