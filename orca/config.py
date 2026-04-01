@@ -87,6 +87,7 @@ BLOCKING_PRIORITY_BOOST = 3.0    # priority for moves that block opponent threat
 SURVIVAL_PRIORITY_BOOST = 2.0    # priority for surviving an opponent threat turn
 USE_AB_HYBRID = True             # set False to disable AB pre-check in MCTS
 AB_HYBRID_DEPTH = 4              # depth of AB pre-check (0 = disable)
+THREAT_POLICY_BLEND = 0.3        # blend threat spatial map into policy logits (0 = disabled)
 
 # ---------------------------------------------------------------------------
 # Mixed precision (CUDA only - MPS FP16 is unreliable)

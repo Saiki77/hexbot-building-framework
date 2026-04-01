@@ -225,9 +225,13 @@ class HexNet(nn.Module):
         self.value_fc2 = nn.Linear(256, 1)
 
         # Threat detection head: predicts [my_4, my_5, opp_4, opp_5] in a row
+        # Spatial output is blended into policy so MCTS explores threats
         self.threat_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
         self.threat_bn = nn.BatchNorm2d(1)
         self.threat_fc = nn.Linear(bs2, 4)
+
+        from orca.config import THREAT_POLICY_BLEND
+        self.threat_blend = THREAT_POLICY_BLEND
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Initial block
@@ -246,20 +250,26 @@ class HexNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v))  # (batch, 1)
 
-        # Threat head
-        t = F.relu(self.threat_bn(self.threat_conv(x)))
-        t = t.view(t.size(0), -1)
-        t = self.threat_fc(t)  # (batch, 4)
+        # Threat head — spatial map blended into policy
+        t_spatial = F.relu(self.threat_bn(self.threat_conv(x)))  # (B, 1, H, W)
+        t_flat = t_spatial.view(t_spatial.size(0), -1)           # (B, H*W)
+        if self.threat_blend > 0:
+            p = p + self.threat_blend * t_flat                   # boost threat regions
+        t = self.threat_fc(t_flat)                               # (B, 4) for training
 
         return p, v, t
 
     def forward_pv(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Policy + value only (for ONNX export and inference)."""
+        """Policy + value with threat blend (for inference)."""
         x = F.relu(self.bn_init(self.conv_init(x)))
         x = self.res_blocks(x)
         p = F.relu(self.policy_bn(self.policy_conv(x)))
         p = p.view(p.size(0), -1)
         p = self.policy_fc(p)
+        # Threat spatial blend into policy
+        if self.threat_blend > 0:
+            t_spatial = F.relu(self.threat_bn(self.threat_conv(x)))
+            p = p + self.threat_blend * t_spatial.view(p.size(0), -1)
         v = F.relu(self.value_bn(self.value_conv(x)))
         v = v.view(v.size(0), -1)
         v = F.relu(self.value_fc1(v))
@@ -338,10 +348,13 @@ class HybridHexNet(nn.Module):
         self.value_fc1 = nn.Linear(bs2, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
-        # Threat head
+        # Threat head (spatial map blended into policy)
         self.threat_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
         self.threat_bn = nn.BatchNorm2d(1)
         self.threat_fc = nn.Linear(bs2, 4)
+
+        from orca.config import THREAT_POLICY_BLEND
+        self.threat_blend = THREAT_POLICY_BLEND
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B = x.size(0)
@@ -376,10 +389,12 @@ class HybridHexNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v))
 
-        # Threat head
-        t = F.relu(self.threat_bn(self.threat_conv(x)))
-        t = t.view(B, -1)
-        t = self.threat_fc(t)
+        # Threat head — spatial map blended into policy
+        t_spatial = F.relu(self.threat_bn(self.threat_conv(x)))
+        t_flat = t_spatial.view(B, -1)
+        if self.threat_blend > 0:
+            p = p + self.threat_blend * t_flat
+        t = self.threat_fc(t_flat)
 
         return p, v, t
 

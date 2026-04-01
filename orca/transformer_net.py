@@ -136,10 +136,12 @@ class TransformerHexNet(nn.Module):
         self.value_fc1 = nn.Linear(bs2, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
-        # Threat head
+        # Threat head (spatial map blended into policy)
         self.threat_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
         self.threat_bn = nn.BatchNorm2d(1)
         self.threat_fc = nn.Linear(bs2, 4)
+        from orca.config import THREAT_POLICY_BLEND
+        self.threat_blend = THREAT_POLICY_BLEND
 
     def forward(self, x):
         batch = x.size(0)
@@ -148,11 +150,10 @@ class TransformerHexNet(nn.Module):
         # CNN backbone
         x = F.relu(self.bn_init(self.conv_init(x)))
         x = self.res_blocks(x)
-        # x: (batch, num_filters, N, N)
 
         # Reshape to sequence for transformer: (batch, N*N, num_filters)
         C = x.size(1)
-        seq = x.view(batch, C, N * N).permute(0, 2, 1)  # (batch, 361, 128)
+        seq = x.view(batch, C, N * N).permute(0, 2, 1)
         seq = self.pos_encoding(seq)
 
         # Transformer attention (global reasoning across all positions)
@@ -173,10 +174,12 @@ class TransformerHexNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v))
 
-        # Threat head
-        t = F.relu(self.threat_bn(self.threat_conv(x)))
-        t = t.view(batch, -1)
-        t = self.threat_fc(t)
+        # Threat — spatial blend into policy
+        t_spatial = F.relu(self.threat_bn(self.threat_conv(x)))
+        t_flat = t_spatial.view(batch, -1)
+        if self.threat_blend > 0:
+            p = p + self.threat_blend * t_flat
+        t = self.threat_fc(t_flat)
 
         return p, v, t
 

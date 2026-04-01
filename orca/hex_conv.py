@@ -203,10 +203,12 @@ class HexMaskedNet(nn.Module):
         self.value_fc1 = nn.Linear(bs2, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
-        # Threat head
+        # Threat head (spatial map blended into policy)
         self.threat_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
         self.threat_bn = nn.BatchNorm2d(1)
         self.threat_fc = nn.Linear(bs2, 4)
+        from orca.config import THREAT_POLICY_BLEND
+        self.threat_blend = THREAT_POLICY_BLEND
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch = x.size(0)
@@ -225,10 +227,12 @@ class HexMaskedNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v))
 
-        # Threat
-        t = F.relu(self.threat_bn(self.threat_conv(x)))
-        t = t.view(batch, -1)
-        t = self.threat_fc(t)
+        # Threat — spatial blend into policy
+        t_spatial = F.relu(self.threat_bn(self.threat_conv(x)))
+        t_flat = t_spatial.view(batch, -1)
+        if self.threat_blend > 0:
+            p = p + self.threat_blend * t_flat
+        t = self.threat_fc(t_flat)
 
         return p, v, t
 
@@ -307,6 +311,8 @@ class HexNativeNet(nn.Module):
         self.threat_conv = nn.Conv2d(num_filters, 1, 1, bias=False)
         self.threat_bn = nn.BatchNorm2d(1)
         self.threat_fc = nn.Linear(bs2, 4)
+        from orca.config import THREAT_POLICY_BLEND
+        self.threat_blend = THREAT_POLICY_BLEND
 
     def forward(self, x):
         batch = x.size(0)
@@ -322,9 +328,11 @@ class HexNativeNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v))
 
-        t = F.relu(self.threat_bn(self.threat_conv(x)))
-        t = t.view(batch, -1)
-        t = self.threat_fc(t)
+        t_spatial = F.relu(self.threat_bn(self.threat_conv(x)))
+        t_flat = t_spatial.view(batch, -1)
+        if self.threat_blend > 0:
+            p = p + self.threat_blend * t_flat
+        t = self.threat_fc(t_flat)
 
         return p, v, t
 

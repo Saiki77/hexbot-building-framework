@@ -952,6 +952,7 @@ def api_config():
             'survival_priority_boost': cfg.SURVIVAL_PRIORITY_BOOST,
             'use_ab_hybrid': cfg.USE_AB_HYBRID,
             'ab_hybrid_depth': cfg.AB_HYBRID_DEPTH,
+            'threat_policy_blend': cfg.THREAT_POLICY_BLEND,
         },
         'mixed_precision': {
             'enabled': cfg.USE_MIXED_PRECISION,
@@ -1011,6 +1012,7 @@ def api_config_update():
         'survival_priority_boost': ('SURVIVAL_PRIORITY_BOOST', float),
         'use_ab_hybrid':       ('USE_AB_HYBRID', bool),
         'ab_hybrid_depth':     ('AB_HYBRID_DEPTH', int),
+        'threat_policy_blend': ('THREAT_POLICY_BLEND', float),
         # Mixed precision
         'mixed_precision':     ('USE_MIXED_PRECISION', bool),
         'grad_clip_norm':      ('GRAD_CLIP_NORM', float),
@@ -1503,6 +1505,7 @@ footer span{white-space:nowrap}
           <div class="cfg-row"><label title="Priority boost for positions where the player survived an opponent's threat sequence">Survival boost</label><input type="number" id="cfg-survival_priority_boost" step="0.5" min="0" max="10" onchange="cfgUpdate('survival_priority_boost',+this.value)"></div>
           <div class="cfg-row"><label title="Run alpha-beta pre-check before MCTS to detect forced wins/blocks. Catches tactical shots MCTS might miss">AB hybrid</label><input type="checkbox" id="cfg-use_ab_hybrid" onchange="cfgUpdate('use_ab_hybrid',this.checked)"></div>
           <div class="cfg-row"><label title="Alpha-beta search depth for the hybrid pre-check. 4 is fast, 6+ catches deeper tactics but slows self-play">AB depth</label><input type="number" id="cfg-ab_hybrid_depth" step="1" min="0" max="12" onchange="cfgUpdate('ab_hybrid_depth',+this.value)"></div>
+          <div class="cfg-row"><label title="Blend threat head spatial map into policy logits. The threat conv learns WHERE threats are and boosts those cells in MCTS policy. 0 = disabled, 0.3 = standard, higher = more threat-driven play">Threat blend</label><input type="number" id="cfg-threat_policy_blend" step="0.05" min="0" max="2" onchange="cfgUpdate('threat_policy_blend',+this.value)"></div>
         </div>
       </div>
 
@@ -1658,6 +1661,7 @@ function loadConfig() {
       cfgSet('cfg-blocking_priority_boost', d.defensive.blocking_priority_boost);
       cfgSet('cfg-survival_priority_boost', d.defensive.survival_priority_boost);
       cfgSet('cfg-use_ab_hybrid', d.defensive.use_ab_hybrid); cfgSet('cfg-ab_hybrid_depth', d.defensive.ab_hybrid_depth);
+      cfgSet('cfg-threat_policy_blend', d.defensive.threat_policy_blend);
     }
     if (d.mixed_precision) {
       cfgSet('cfg-mixed_precision', d.mixed_precision.enabled); cfgSet('cfg-grad_clip_norm', d.mixed_precision.grad_clip_norm);

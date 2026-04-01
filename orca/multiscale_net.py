@@ -158,10 +158,12 @@ class MultiScaleHexNet(nn.Module):
         self.value_fc1 = nn.Linear(bs2, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
-        # Threat head
+        # Threat head (spatial map blended into policy)
         self.threat_conv = nn.Conv2d(fused, 1, 1, bias=False)
         self.threat_bn = nn.BatchNorm2d(1)
         self.threat_fc = nn.Linear(bs2, 4)
+        from orca.config import THREAT_POLICY_BLEND
+        self.threat_blend = THREAT_POLICY_BLEND
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch = x.size(0)
@@ -170,11 +172,11 @@ class MultiScaleHexNet(nn.Module):
         stem = F.relu(self.stem_bn(self.stem_conv(x)))
 
         # Two towers
-        local_feat = self.local_tower(stem)   # (batch, 64, N, N)
-        global_feat = self.global_tower(stem)  # (batch, 64, N, N)
+        local_feat = self.local_tower(stem)
+        global_feat = self.global_tower(stem)
 
         # Fusion: concatenate local + global
-        fused = torch.cat([local_feat, global_feat], dim=1)  # (batch, 128, N, N)
+        fused = torch.cat([local_feat, global_feat], dim=1)
         fused = F.relu(self.fusion_bn(self.fusion_conv(fused)))
 
         # Policy head
@@ -188,10 +190,12 @@ class MultiScaleHexNet(nn.Module):
         v = F.relu(self.value_fc1(v))
         v = torch.tanh(self.value_fc2(v))
 
-        # Threat head
-        t = F.relu(self.threat_bn(self.threat_conv(fused)))
-        t = t.view(batch, -1)
-        t = self.threat_fc(t)
+        # Threat — spatial blend into policy
+        t_spatial = F.relu(self.threat_bn(self.threat_conv(fused)))
+        t_flat = t_spatial.view(batch, -1)
+        if self.threat_blend > 0:
+            p = p + self.threat_blend * t_flat
+        t = self.threat_fc(t_flat)
 
         return p, v, t
 

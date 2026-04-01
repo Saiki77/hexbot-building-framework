@@ -156,8 +156,11 @@ class HexGNN(nn.Module):
         self.value_fc1 = nn.Linear(hidden_dim, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
-        # Threat head (global)
+        # Threat head (global output + per-node spatial blend into policy)
         self.threat_fc = nn.Linear(hidden_dim, 4)
+        self.threat_spatial_proj = nn.Linear(hidden_dim, 1)  # per-node threat score
+        from orca.config import THREAT_POLICY_BLEND
+        self.threat_blend = THREAT_POLICY_BLEND
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -180,6 +183,11 @@ class HexGNN(nn.Module):
         # Policy: per-node logits
         p = self.policy_proj(x).squeeze(-1)  # (batch, N*N)
 
+        # Threat spatial blend: per-node threat scores into policy
+        if self.threat_blend > 0:
+            t_spatial = self.threat_spatial_proj(x).squeeze(-1)  # (batch, N*N)
+            p = p + self.threat_blend * t_spatial
+
         # Global attention pooling
         attn_weights = F.softmax(self.attn_query(x).squeeze(-1), dim=1)  # (batch, N*N)
         global_feat = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)  # (batch, hidden)
@@ -188,7 +196,7 @@ class HexGNN(nn.Module):
         v = F.gelu(self.value_fc1(global_feat))
         v = torch.tanh(self.value_fc2(v))  # (batch, 1)
 
-        # Threat head
+        # Threat head (global classification)
         t = self.threat_fc(global_feat)  # (batch, 4)
 
         return p, v, t
