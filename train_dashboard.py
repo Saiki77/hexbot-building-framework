@@ -1270,7 +1270,8 @@ footer span{white-space:nowrap}
 .cfg-section-body{padding:8px 0 4px 0;transition:max-height .25s ease,opacity .2s ease;overflow:hidden}
 .cfg-section-body.collapsed{max-height:0!important;opacity:0;padding:0}
 .cfg-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.cfg-row label{width:130px;font:bold 11px 'SF Mono','Courier New',monospace;flex-shrink:0}
+.cfg-row label{width:130px;font:bold 11px 'SF Mono','Courier New',monospace;flex-shrink:0;cursor:help;
+  border-bottom:1px dotted #ccc}
 .cfg-row input[type=number]{width:100px;font:12px 'SF Mono','Courier New',monospace;border:1px solid #ccc;
   padding:3px 6px;background:#fafafa;outline:none}
 .cfg-row input[type=number]:focus{border-color:#000;background:#fff}
@@ -1393,10 +1394,10 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Network
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Board size</label><span class="cfg-ro" id="cfg-board_size">19</span></div>
-          <div class="cfg-row"><label>Input channels</label><span class="cfg-ro" id="cfg-num_channels">7</span></div>
-          <div class="cfg-row"><label>Filters</label><span class="cfg-ro" id="cfg-filters">128</span></div>
-          <div class="cfg-row"><label>Res blocks</label><span class="cfg-ro" id="cfg-res_blocks">12</span></div>
+          <div class="cfg-row"><label title="Encoding grid size (19x19 captures all relevant hexes)">Board size</label><span class="cfg-ro" id="cfg-board_size">19</span></div>
+          <div class="cfg-row"><label title="Input feature planes: 5 board planes + 2 threat planes">Input channels</label><span class="cfg-ro" id="cfg-num_channels">7</span></div>
+          <div class="cfg-row"><label title="Conv2d filter width. 128 = fast, 256 = stronger but slower">Filters</label><span class="cfg-ro" id="cfg-filters">128</span></div>
+          <div class="cfg-row"><label title="Depth of the residual tower. More blocks = stronger but slower">Res blocks</label><span class="cfg-ro" id="cfg-res_blocks">12</span></div>
           <div class="cfg-hint">Network architecture is read-only (set via --config at launch)</div>
         </div>
       </div>
@@ -1406,12 +1407,12 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Search (MCTS)
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>C PUCT</label><input type="number" id="cfg-c_puct" step="0.1" min="0.1" max="10" onchange="cfgUpdate('c_puct',+this.value)"></div>
-          <div class="cfg-row"><label>Simulations</label><input type="number" id="cfg-sims" step="10" min="10" max="1600" onchange="cfgUpdate('sims',+this.value)"></div>
-          <div class="cfg-row"><label>MCTS batch</label><input type="number" id="cfg-mcts_batch" step="8" min="1" max="512" onchange="cfgUpdate('mcts_batch',+this.value)"></div>
-          <div class="cfg-row"><label>Dirichlet alpha</label><input type="number" id="cfg-dirichlet_alpha" step="0.01" min="0.01" max="1" onchange="cfgUpdate('dirichlet_alpha',+this.value)"></div>
-          <div class="cfg-row"><label>Dirichlet epsilon</label><input type="number" id="cfg-dirichlet_epsilon" step="0.05" min="0" max="1" onchange="cfgUpdate('dirichlet_epsilon',+this.value)"></div>
-          <div class="cfg-row"><label>Temp threshold</label><input type="number" id="cfg-temp_threshold" step="1" min="0" max="100" onchange="cfgUpdate('temp_threshold',+this.value)"></div>
+          <div class="cfg-row"><label title="Exploration constant balancing prior vs visit count. Higher = more exploration, lower = more exploitation">C PUCT</label><input type="number" id="cfg-c_puct" step="0.1" min="0.1" max="10" onchange="cfgUpdate('c_puct',+this.value)"></div>
+          <div class="cfg-row"><label title="MCTS simulations per move. Target value that curriculum scales toward (25% early, 100% at iter 60+). More sims = stronger but slower">Simulations</label><input type="number" id="cfg-sims" step="10" min="10" max="1600" onchange="cfgUpdate('sims',+this.value)"></div>
+          <div class="cfg-row"><label title="Positions batched per NN forward pass during MCTS. Higher = better GPU utilization">MCTS batch</label><input type="number" id="cfg-mcts_batch" step="8" min="1" max="512" onchange="cfgUpdate('mcts_batch',+this.value)"></div>
+          <div class="cfg-row"><label title="Root noise parameter. Lower = more concentrated noise (less diverse), higher = more uniform. 0.03 for Go, 0.3 for hex">Dirichlet alpha</label><input type="number" id="cfg-dirichlet_alpha" step="0.01" min="0.01" max="1" onchange="cfgUpdate('dirichlet_alpha',+this.value)"></div>
+          <div class="cfg-row"><label title="Fraction of root prior replaced by Dirichlet noise. 0 = no noise, 0.25 = standard AlphaZero">Dirichlet epsilon</label><input type="number" id="cfg-dirichlet_epsilon" step="0.05" min="0" max="1" onchange="cfgUpdate('dirichlet_epsilon',+this.value)"></div>
+          <div class="cfg-row"><label title="Move number after which MCTS switches from sampling to greedy (argmax). Lower = less randomness in mid/endgame">Temp threshold</label><input type="number" id="cfg-temp_threshold" step="1" min="0" max="100" onchange="cfgUpdate('temp_threshold',+this.value)"></div>
         </div>
       </div>
 
@@ -1420,10 +1421,10 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Training
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Batch size</label><input type="number" id="cfg-batch_size" step="64" min="32" max="4096" onchange="cfgUpdate('batch_size',+this.value)"></div>
-          <div class="cfg-row"><label>Learning rate</label><input type="number" id="cfg-lr" step="0.0001" min="0.00001" max="0.1" onchange="cfgUpdate('lr',+this.value)"></div>
-          <div class="cfg-row"><label>L2 reg</label><input type="number" id="cfg-l2_reg" step="0.00001" min="0" max="0.01" onchange="cfgUpdate('l2_reg',+this.value)"></div>
-          <div class="cfg-row"><label>Buffer size</label><input type="number" id="cfg-buffer_size" step="50000" min="10000" max="2000000" onchange="cfgUpdate('buffer_size',+this.value)"></div>
+          <div class="cfg-row"><label title="Samples per gradient step. Larger = more stable but uses more memory. 1024 is good for most GPUs">Batch size</label><input type="number" id="cfg-batch_size" step="64" min="32" max="4096" onchange="cfgUpdate('batch_size',+this.value)"></div>
+          <div class="cfg-row"><label title="Adam optimizer learning rate. Cosine schedule cycles between this and eta_min">Learning rate</label><input type="number" id="cfg-lr" step="0.0001" min="0.00001" max="0.1" onchange="cfgUpdate('lr',+this.value)"></div>
+          <div class="cfg-row"><label title="Weight decay (L2 regularization). Prevents overfitting by penalizing large weights">L2 reg</label><input type="number" id="cfg-l2_reg" step="0.00001" min="0" max="0.01" onchange="cfgUpdate('l2_reg',+this.value)"></div>
+          <div class="cfg-row"><label title="Experience replay capacity. Older samples are evicted when full. Larger = more diverse training data">Buffer size</label><input type="number" id="cfg-buffer_size" step="50000" min="10000" max="2000000" onchange="cfgUpdate('buffer_size',+this.value)"></div>
         </div>
       </div>
 
@@ -1432,11 +1433,11 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Pipeline
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Train steps</label><input type="number" id="cfg-train_steps" step="10" min="10" max="2000" onchange="cfgUpdate('train_steps',+this.value)"></div>
-          <div class="cfg-row"><label>Games / iter</label><input type="number" id="cfg-games_per_iter" step="5" min="1" max="500" onchange="cfgUpdate('games_per_iter',+this.value)"></div>
-          <div class="cfg-row"><label>Checkpoint every</label><input type="number" id="cfg-checkpoint_every" step="1" min="1" max="100" onchange="cfgUpdate('checkpoint_every',+this.value)"></div>
-          <div class="cfg-row"><label>Max workers</label><input type="number" id="cfg-max_workers" step="1" min="1" max="32" onchange="cfgUpdate('max_workers',+this.value)"></div>
-          <div class="cfg-row"><label>Games / future</label><input type="number" id="cfg-games_per_future" step="1" min="1" max="10" onchange="cfgUpdate('games_per_future',+this.value)"></div>
+          <div class="cfg-row"><label title="Gradient update steps per iteration. More = better learning per iteration but slower">Train steps</label><input type="number" id="cfg-train_steps" step="10" min="10" max="2000" onchange="cfgUpdate('train_steps',+this.value)"></div>
+          <div class="cfg-row"><label title="Base self-play games per iteration. Curriculum scales this (1.5x early, 1x at full sims)">Games / iter</label><input type="number" id="cfg-games_per_iter" step="5" min="1" max="500" onchange="cfgUpdate('games_per_iter',+this.value)"></div>
+          <div class="cfg-row"><label title="Save model checkpoint every N iterations">Checkpoint every</label><input type="number" id="cfg-checkpoint_every" step="1" min="1" max="100" onchange="cfgUpdate('checkpoint_every',+this.value)"></div>
+          <div class="cfg-row"><label title="Parallel self-play workers. Threads on CUDA (shared GPU), processes on MPS/CPU">Max workers</label><input type="number" id="cfg-max_workers" step="1" min="1" max="32" onchange="cfgUpdate('max_workers',+this.value)"></div>
+          <div class="cfg-row"><label title="Games assigned per subprocess future. Higher = less overhead, lower = better load balancing">Games / future</label><input type="number" id="cfg-games_per_future" step="1" min="1" max="10" onchange="cfgUpdate('games_per_future',+this.value)"></div>
         </div>
       </div>
 
@@ -1445,12 +1446,12 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> ELO Evaluation
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Eval every</label><input type="number" id="cfg-eval_every" step="1" min="1" max="50" onchange="cfgUpdate('eval_every',+this.value)"></div>
-          <div class="cfg-row"><label>Eval games</label><input type="number" id="cfg-eval_games" step="1" min="1" max="50" onchange="cfgUpdate('eval_games',+this.value)"></div>
-          <div class="cfg-row"><label>Eval sims</label><input type="number" id="cfg-eval_sims" step="5" min="5" max="400" onchange="cfgUpdate('eval_sims',+this.value)"></div>
-          <div class="cfg-row"><label>Max opponents</label><input type="number" id="cfg-max_opponents" step="1" min="1" max="20" onchange="cfgUpdate('max_opponents',+this.value)"></div>
-          <div class="cfg-row"><label>Baseline games</label><input type="number" id="cfg-baseline_games" step="1" min="0" max="20" onchange="cfgUpdate('baseline_games',+this.value)"></div>
-          <div class="cfg-row"><label>Vault max models</label><input type="number" id="cfg-vault_max_models" step="10" min="10" max="1000" onchange="cfgUpdate('vault_max_models',+this.value)"></div>
+          <div class="cfg-row"><label title="Run ELO evaluation every N training iterations">Eval every</label><input type="number" id="cfg-eval_every" step="1" min="1" max="50" onchange="cfgUpdate('eval_every',+this.value)"></div>
+          <div class="cfg-row"><label title="Games played against each past opponent per evaluation round">Eval games</label><input type="number" id="cfg-eval_games" step="1" min="1" max="50" onchange="cfgUpdate('eval_games',+this.value)"></div>
+          <div class="cfg-row"><label title="MCTS simulations during ELO games. Lower = faster eval but noisier ratings">Eval sims</label><input type="number" id="cfg-eval_sims" step="5" min="5" max="400" onchange="cfgUpdate('eval_sims',+this.value)"></div>
+          <div class="cfg-row"><label title="Max past model versions to play against per evaluation. More = better ELO estimate but slower">Max opponents</label><input type="number" id="cfg-max_opponents" step="1" min="1" max="20" onchange="cfgUpdate('max_opponents',+this.value)"></div>
+          <div class="cfg-row"><label title="Games vs random (~500 ELO) + heuristic (~1000 ELO) baselines. 0 = disable baseline anchoring">Baseline games</label><input type="number" id="cfg-baseline_games" step="1" min="0" max="20" onchange="cfgUpdate('baseline_games',+this.value)"></div>
+          <div class="cfg-row"><label title="Maximum stored model snapshots in the vault. Old models are evicted when full">Vault max models</label><input type="number" id="cfg-vault_max_models" step="10" min="10" max="1000" onchange="cfgUpdate('vault_max_models',+this.value)"></div>
         </div>
       </div>
 
@@ -1459,15 +1460,15 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Play Style
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Style</label>
+          <div class="cfg-row"><label title="Colony strategy: 'distant' places stones far apart for multi-front pressure, 'close' keeps groups connected">Style</label>
             <select id="cfg-play_style" onchange="cfgUpdate('play_style',this.value)">
               <option value="distant">distant</option>
               <option value="close">close</option>
             </select>
           </div>
-          <div class="cfg-row"><label>C blend adjacent</label><input type="number" id="cfg-c_blend_adjacent" step="0.01" min="0" max="1" onchange="cfgUpdate('c_blend_adjacent',+this.value)"></div>
-          <div class="cfg-row"><label>C blend distant</label><input type="number" id="cfg-c_blend_distant" step="0.01" min="0" max="1" onchange="cfgUpdate('c_blend_distant',+this.value)"></div>
-          <div class="cfg-row"><label>Explore prob</label><input type="number" id="cfg-distant_explore_prob" step="0.05" min="0" max="1" onchange="cfgUpdate('distant_explore_prob',+this.value)"></div>
+          <div class="cfg-row"><label title="Heuristic weight blended into MCTS prior for moves adjacent to existing stones">C blend adjacent</label><input type="number" id="cfg-c_blend_adjacent" step="0.01" min="0" max="1" onchange="cfgUpdate('c_blend_adjacent',+this.value)"></div>
+          <div class="cfg-row"><label title="Heuristic weight blended into MCTS prior for distant moves (colony placements)">C blend distant</label><input type="number" id="cfg-c_blend_distant" step="0.01" min="0" max="1" onchange="cfgUpdate('c_blend_distant',+this.value)"></div>
+          <div class="cfg-row"><label title="Probability of injecting distant candidate moves into the policy. Helps explore multi-front strategies">Explore prob</label><input type="number" id="cfg-distant_explore_prob" step="0.05" min="0" max="1" onchange="cfgUpdate('distant_explore_prob',+this.value)"></div>
         </div>
       </div>
 
@@ -1476,9 +1477,9 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Curriculum / Plateau
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Plateau threshold</label><input type="number" id="cfg-plateau_threshold" step="1" min="1" max="100" onchange="cfgUpdate('plateau_threshold',+this.value)"></div>
-          <div class="cfg-row"><label>Plateau iters</label><input type="number" id="cfg-plateau_iters" step="1" min="1" max="50" onchange="cfgUpdate('plateau_iters',+this.value)"></div>
-          <div class="cfg-row"><label>Plateau sim boost</label><input type="number" id="cfg-plateau_sim_boost" step="10" min="0" max="200" onchange="cfgUpdate('plateau_sim_boost',+this.value)"></div>
+          <div class="cfg-row"><label title="ELO change below this threshold counts as stalled. Triggers sim boost after plateau_iters of stall">Plateau threshold</label><input type="number" id="cfg-plateau_threshold" step="1" min="1" max="100" onchange="cfgUpdate('plateau_threshold',+this.value)"></div>
+          <div class="cfg-row"><label title="Consecutive stalled iterations before boosting sims to break through plateau">Plateau iters</label><input type="number" id="cfg-plateau_iters" step="1" min="1" max="50" onchange="cfgUpdate('plateau_iters',+this.value)"></div>
+          <div class="cfg-row"><label title="Extra simulations added when plateau is detected (capped at 2x configured sims)">Plateau sim boost</label><input type="number" id="cfg-plateau_sim_boost" step="10" min="0" max="200" onchange="cfgUpdate('plateau_sim_boost',+this.value)"></div>
         </div>
       </div>
 
@@ -1487,9 +1488,9 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> LR Schedule
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Cosine T0</label><input type="number" id="cfg-cosine_t0" step="5" min="5" max="500" onchange="cfgUpdate('cosine_t0',+this.value)"></div>
-          <div class="cfg-row"><label>Cosine T mult</label><input type="number" id="cfg-cosine_t_mult" step="1" min="1" max="10" onchange="cfgUpdate('cosine_t_mult',+this.value)"></div>
-          <div class="cfg-row"><label>Cosine eta min</label><input type="number" id="cfg-cosine_eta_min" step="0.00001" min="0" max="0.01" onchange="cfgUpdate('cosine_eta_min',+this.value)"></div>
+          <div class="cfg-row"><label title="First cosine cycle length in iterations. LR decays from max to eta_min over T0 iters, then restarts">Cosine T0</label><input type="number" id="cfg-cosine_t0" step="5" min="5" max="500" onchange="cfgUpdate('cosine_t0',+this.value)"></div>
+          <div class="cfg-row"><label title="Each restart multiplies the cycle length by this factor. 2 = first cycle 50 iters, next 100, then 200...">Cosine T mult</label><input type="number" id="cfg-cosine_t_mult" step="1" min="1" max="10" onchange="cfgUpdate('cosine_t_mult',+this.value)"></div>
+          <div class="cfg-row"><label title="Minimum learning rate at the bottom of each cosine cycle">Cosine eta min</label><input type="number" id="cfg-cosine_eta_min" step="0.00001" min="0" max="0.01" onchange="cfgUpdate('cosine_eta_min',+this.value)"></div>
         </div>
       </div>
 
@@ -1498,10 +1499,10 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Defensive Training
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Blocking boost</label><input type="number" id="cfg-blocking_priority_boost" step="0.5" min="0" max="10" onchange="cfgUpdate('blocking_priority_boost',+this.value)"></div>
-          <div class="cfg-row"><label>Survival boost</label><input type="number" id="cfg-survival_priority_boost" step="0.5" min="0" max="10" onchange="cfgUpdate('survival_priority_boost',+this.value)"></div>
-          <div class="cfg-row"><label>AB hybrid</label><input type="checkbox" id="cfg-use_ab_hybrid" onchange="cfgUpdate('use_ab_hybrid',this.checked)"></div>
-          <div class="cfg-row"><label>AB depth</label><input type="number" id="cfg-ab_hybrid_depth" step="1" min="0" max="12" onchange="cfgUpdate('ab_hybrid_depth',+this.value)"></div>
+          <div class="cfg-row"><label title="Replay buffer priority multiplier for moves that block opponent threats. Higher = train more on blocking positions">Blocking boost</label><input type="number" id="cfg-blocking_priority_boost" step="0.5" min="0" max="10" onchange="cfgUpdate('blocking_priority_boost',+this.value)"></div>
+          <div class="cfg-row"><label title="Priority boost for positions where the player survived an opponent's threat sequence">Survival boost</label><input type="number" id="cfg-survival_priority_boost" step="0.5" min="0" max="10" onchange="cfgUpdate('survival_priority_boost',+this.value)"></div>
+          <div class="cfg-row"><label title="Run alpha-beta pre-check before MCTS to detect forced wins/blocks. Catches tactical shots MCTS might miss">AB hybrid</label><input type="checkbox" id="cfg-use_ab_hybrid" onchange="cfgUpdate('use_ab_hybrid',this.checked)"></div>
+          <div class="cfg-row"><label title="Alpha-beta search depth for the hybrid pre-check. 4 is fast, 6+ catches deeper tactics but slows self-play">AB depth</label><input type="number" id="cfg-ab_hybrid_depth" step="1" min="0" max="12" onchange="cfgUpdate('ab_hybrid_depth',+this.value)"></div>
         </div>
       </div>
 
@@ -1510,8 +1511,8 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Mixed Precision
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Enabled</label><input type="checkbox" id="cfg-mixed_precision" onchange="cfgUpdate('mixed_precision',this.checked)"></div>
-          <div class="cfg-row"><label>Grad clip norm</label><input type="number" id="cfg-grad_clip_norm" step="0.1" min="0" max="10" onchange="cfgUpdate('grad_clip_norm',+this.value)"></div>
+          <div class="cfg-row"><label title="FP16 mixed precision training. ~2x faster on CUDA GPUs with Tensor Cores. Ignored on MPS/CPU">Enabled</label><input type="checkbox" id="cfg-mixed_precision" onchange="cfgUpdate('mixed_precision',this.checked)"></div>
+          <div class="cfg-row"><label title="Max gradient norm for clipping. Prevents exploding gradients. 0 = disabled, 1.0 = standard">Grad clip norm</label><input type="number" id="cfg-grad_clip_norm" step="0.1" min="0" max="10" onchange="cfgUpdate('grad_clip_norm',+this.value)"></div>
           <div class="cfg-hint">Mixed precision only effective on CUDA with Tensor Cores</div>
         </div>
       </div>
@@ -1521,23 +1522,23 @@ footer span{white-space:nowrap}
           <span class="toggle">&#9660;</span> Display
         </div>
         <div class="cfg-section-body">
-          <div class="cfg-row"><label>Replay speed</label>
+          <div class="cfg-row"><label title="Milliseconds between moves during game replay animation">Replay speed</label>
             <input type="range" id="set-speed" min="50" max="500" value="120" step="10"
               oninput="saveSetting('replaySpeed',+this.value);el('set-speed-val').textContent=this.value+'ms'">
             <span class="val" id="set-speed-val">120ms</span>
           </div>
-          <div class="cfg-row"><label>Dot size</label>
+          <div class="cfg-row"><label title="Size of stone dots on the hex board">Dot size</label>
             <input type="range" id="set-dotsize" min="1" max="5" value="2" step="0.5"
               oninput="saveSetting('dotSize',+this.value);el('set-dotsize-val').textContent=this.value;drawHex()">
             <span class="val" id="set-dotsize-val">2</span>
           </div>
-          <div class="cfg-row"><label>Grid radius</label>
+          <div class="cfg-row"><label title="Radius of the empty hex grid drawn around stones">Grid radius</label>
             <input type="range" id="set-radius" min="1" max="4" value="2" step="1"
               oninput="saveSetting('emptyHexRadius',+this.value);el('set-radius-val').textContent=this.value;drawHex()">
             <span class="val" id="set-radius-val">2</span>
           </div>
-          <div class="cfg-row"><label>Move numbers</label><input type="checkbox" id="set-movenums" checked onchange="saveSetting('showMoveNums',this.checked);drawHex()"></div>
-          <div class="cfg-row"><label>Auto-refresh</label><input type="checkbox" id="set-autorefresh" checked onchange="saveSetting('autoRefresh',this.checked)"></div>
+          <div class="cfg-row"><label title="Show move order numbers on each stone">Move numbers</label><input type="checkbox" id="set-movenums" checked onchange="saveSetting('showMoveNums',this.checked);drawHex()"></div>
+          <div class="cfg-row"><label title="Auto-refresh charts after each iteration completes">Auto-refresh</label><input type="checkbox" id="set-autorefresh" checked onchange="saveSetting('autoRefresh',this.checked)"></div>
         </div>
       </div>
     </div>
