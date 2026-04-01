@@ -1712,14 +1712,18 @@ footer span{white-space:nowrap}
 .gh-item:hover{background:#eee}
 .gh-item.active{background:#000;color:#fff}
 .conn-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-left:8px;vertical-align:middle}
+.overlay-toggles{display:flex;gap:6px;margin-top:6px;align-items:center}
+.overlay-toggles .obtn{cursor:pointer;padding:2px 8px;border:1px solid #000;font:bold 10px 'SF Mono',monospace;
+  letter-spacing:1px;user-select:none;background:#fff;color:#000;transition:all .15s}
+.overlay-toggles .obtn.active{background:#000;color:#fff}
+#value-chart-wrap{width:100%;height:60px;position:relative;margin-top:6px;border:1px solid #eee}
+#value-chart{position:absolute;top:0;left:0;width:100%;height:100%}
 </style>
 </head>
 <body>
 <header>
   <span class="title">Hex Bot Training</span>
-  <button id="btn-start" onclick="startTraining()" title="Start" style="background:#000;color:#fff;border:none;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9654;</button>
-  <button id="btn-stop" onclick="stopTraining()" title="Stop" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9632;</button>
-  <span class="status" id="status">IDLE</span>
+  <button id="btn-start" onclick="startTraining()" style="background:#000;color:#fff;border:none;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9654;</button><button id="btn-stop" onclick="stopTraining()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9632;</button><span class="status" id="status">IDLE</span>
   <span class="conn-dot" id="conn-dot" style="background:#ccc" title="Disconnected"></span>
   <span class="settings-btn" onclick="toggleSettings()">&#9881;</span>
 </header>
@@ -1753,42 +1757,6 @@ footer span{white-space:nowrap}
     <input type="checkbox" id="set-autorefresh" checked
       onchange="saveSetting('autoRefresh',this.checked)">
   </div>
-  <div style="border-top:1px solid #ddd;margin:12px 0 8px 0"></div>
-  <div style="font-weight:700;margin-bottom:8px;letter-spacing:2px;font-size:10px;text-transform:uppercase">Training Config</div>
-  <div class="settings-row">
-    <label>MCTS sims</label>
-    <input type="number" id="cfg-sims" value="200" min="10" max="800" style="width:60px;font:11px monospace;border:1px solid #ccc;padding:2px">
-    <button onclick="updateConfig('sims',+el('cfg-sims').value)" style="font:9px monospace;border:1px solid #000;background:#fff;padding:1px 6px;cursor:pointer">Set</button>
-  </div>
-  <div class="settings-row">
-    <label>Batch size</label>
-    <input type="number" id="cfg-batch" value="1024" min="64" max="4096" step="64" style="width:60px;font:11px monospace;border:1px solid #ccc;padding:2px">
-    <button onclick="updateConfig('batch_size',+el('cfg-batch').value)" style="font:9px monospace;border:1px solid #000;background:#fff;padding:1px 6px;cursor:pointer">Set</button>
-  </div>
-  <div class="settings-row">
-    <label>Learning rate</label>
-    <input type="number" id="cfg-lr" value="0.001" min="0.00001" max="0.1" step="0.0001" style="width:70px;font:11px monospace;border:1px solid #ccc;padding:2px">
-    <button onclick="updateConfig('lr',+el('cfg-lr').value)" style="font:9px monospace;border:1px solid #000;background:#fff;padding:1px 6px;cursor:pointer">Set</button>
-  </div>
-  <div class="settings-row">
-    <label>Dirichlet alpha</label>
-    <input type="number" id="cfg-dirichlet" value="0.3" min="0.01" max="1.0" step="0.05" style="width:60px;font:11px monospace;border:1px solid #ccc;padding:2px">
-    <button onclick="updateConfig('dirichlet_alpha',+el('cfg-dirichlet').value)" style="font:9px monospace;border:1px solid #000;background:#fff;padding:1px 6px;cursor:pointer">Set</button>
-  </div>
-  <div class="settings-row">
-    <label>Temp threshold</label>
-    <input type="number" id="cfg-temp" value="35" min="5" max="100" style="width:60px;font:11px monospace;border:1px solid #ccc;padding:2px">
-    <button onclick="updateConfig('temp_threshold',+el('cfg-temp').value)" style="font:9px monospace;border:1px solid #000;background:#fff;padding:1px 6px;cursor:pointer">Set</button>
-  </div>
-  <div class="settings-row">
-    <label>Play style</label>
-    <select id="cfg-playstyle" style="font:11px monospace;border:1px solid #ccc;padding:2px"
-      onchange="updateConfig('play_style',this.value)">
-      <option value="distant">distant</option>
-      <option value="close">close</option>
-    </select>
-  </div>
-  <div id="cfg-status" style="font:9px monospace;color:#666;margin-top:4px"></div>
 </div>
 <main>
   <div class="left">
@@ -1817,11 +1785,17 @@ footer span{white-space:nowrap}
     </div>
     <div id="hex-canvas-wrap"><canvas id="hex-canvas"></canvas></div>
     <div class="game-info" id="game-info">Waiting for games...</div>
+    <div class="overlay-toggles">
+      <span class="obtn" id="btn-val" onclick="toggleOverlay('value')" title="Value/quality overlay (V)">V</span>
+      <span class="obtn" id="btn-threat" onclick="toggleOverlay('threat')" title="Threat overlay (T)">T</span>
+      <span style="font:8px 'SF Mono',monospace;color:#999;margin-left:4px" id="analysis-label"></span>
+    </div>
+    <div id="value-chart-wrap" style="display:none"><canvas id="value-chart"></canvas></div>
     <div id="game-history" style="width:100%;margin-top:6px;max-height:48px;overflow-y:auto;overflow-x:hidden;
       font:9px 'SF Mono',monospace;border-top:1px solid #eee;padding-top:4px;line-height:1.6">
     </div>
     <div style="font:8px 'SF Mono',monospace;color:#bbb;margin-top:2px">
-      Space: pause &middot; R: restart
+      Space: pause &middot; R: restart &middot; V: value &middot; T: threats
     </div>
   </div>
   <div class="right">
@@ -1882,6 +1856,8 @@ footer span{white-space:nowrap}
   <span class="sep">|</span>
   <span>Elo <b id="s-elo">1000</b></span>
   <span class="sep">|</span>
+  <span>Best <b id="s-best-elo">--</b> @ iter <b id="s-best-iter">--</b></span>
+  <span class="sep">|</span>
   <span>Win P0:<b id="s-w0">0</b>% P1:<b id="s-w1">0</b>%</span>
   <span class="sep">|</span>
   <span class="res-bar">CPU <div class="res-meter"><div class="res-meter-fill" id="cpu-fill" style="width:0%"></div></div> <b id="s-cpu">0</b>%</span>
@@ -1907,6 +1883,51 @@ socket.on('iteration_complete', d => {
 socket.on('training_complete', () => {
   el('status').textContent = 'COMPLETE';
 });
+
+// --- Start / Stop training ---
+function startTraining() {
+  fetch('/api/train/start', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  }).then(r => r.json()).then(d => {
+    el('status').textContent = d.status === 'started' ? 'STARTING...' : 'ALREADY RUNNING';
+  });
+}
+function stopTraining() {
+  fetch('/api/train/stop', { method: 'POST' }).then(() => {
+    el('status').textContent = 'STOPPING...';
+  });
+}
+
+// --- Training config ---
+function updateConfig(key, value) {
+  const body = {}; body[key] = value;
+  fetch('/api/config', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(r => r.json()).then(d => {
+    const s = el('cfg-status');
+    if (s) s.textContent = 'Updated: ' + d.updated.join(', ');
+    setTimeout(() => { if (s) s.textContent = ''; }, 3000);
+  });
+}
+function loadConfig() {
+  fetch('/api/config').then(r => r.json()).then(d => {
+    if (d.search) {
+      if (el('cfg-sims')) el('cfg-sims').value = d.search.sims;
+      if (el('cfg-dirichlet')) el('cfg-dirichlet').value = d.search.dirichlet_alpha;
+      if (el('cfg-temp')) el('cfg-temp').value = d.search.temp_threshold;
+    }
+    if (d.training) {
+      if (el('cfg-batch')) el('cfg-batch').value = d.training.batch_size;
+      if (el('cfg-lr')) el('cfg-lr').value = d.training.lr;
+    }
+    if (d.play_style) {
+      if (el('cfg-playstyle')) el('cfg-playstyle').value = d.play_style.style;
+    }
+  }).catch(() => {});
+}
+setTimeout(loadConfig, 500);
 </script>
 <script>
 // ---------------------------------------------------------------------------
@@ -1923,8 +1944,93 @@ socket.on('disconnect', () => {
 
 let stones0 = [], stones1 = [], moveOrder = [];  // moveOrder[i] = {q, r, num, player}
 
+// KaTrain-style analysis overlay state
+let analysisData = null;  // array of {value_estimate, top_moves, threat_count} per move
+let overlayMode = { value: false, threat: false };
+
 function el(id) { return document.getElementById(id); }
 function setInfo(t) { el('game-info').textContent = t; }
+
+function toggleOverlay(mode) {
+  overlayMode[mode] = !overlayMode[mode];
+  const btn = el('btn-' + (mode === 'value' ? 'val' : 'threat'));
+  if (btn) btn.classList.toggle('active', overlayMode[mode]);
+  // Show/hide value chart when value overlay is active
+  const vcw = el('value-chart-wrap');
+  if (vcw) vcw.style.display = (overlayMode.value && analysisData) ? '' : 'none';
+  drawHex();
+  if (overlayMode.value && analysisData) drawValueChart();
+}
+
+function drawValueChart() {
+  if (!analysisData || !analysisData.length) return;
+  const cv = el('value-chart');
+  if (!cv) return;
+  const { w: W, h: H } = sizeCanvas(cv);
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const n = Math.min(analysisData.length, replayMoveIdx || analysisData.length);
+  if (n < 1) return;
+
+  const pad = { l: 30, r: 8, t: 4, b: 4 };
+  const pW = W - pad.l - pad.r, pH = H - pad.t - pad.b;
+  if (pW < 10 || pH < 10) return;
+
+  // Zero line
+  const zeroY = pad.t + pH / 2;
+  ctx.strokeStyle = '#ccc'; ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(pad.l, zeroY); ctx.lineTo(pad.l + pW, zeroY); ctx.stroke();
+
+  // Y axis labels
+  ctx.fillStyle = '#999'; ctx.font = '8px Courier New'; ctx.textAlign = 'right';
+  ctx.fillText('+1', pad.l - 3, pad.t + 8);
+  ctx.fillText('-1', pad.l - 3, pad.t + pH);
+  ctx.fillText('0', pad.l - 3, zeroY + 3);
+
+  // Line chart of value estimates
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = pad.l + (i / Math.max(analysisData.length - 1, 1)) * pW;
+    const v = analysisData[i].value_estimate || 0;
+    const y = pad.t + pH / 2 - (v * pH / 2);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Current move marker
+  if (replayMoveIdx > 0 && replayMoveIdx <= analysisData.length) {
+    const i = replayMoveIdx - 1;
+    const x = pad.l + (i / Math.max(analysisData.length - 1, 1)) * pW;
+    const v = analysisData[i].value_estimate || 0;
+    const y = pad.t + pH / 2 - (v * pH / 2);
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// Compute move quality: compare value[i] to value[i-1]
+// Returns 'good', 'neutral', 'blunder', or null
+function getMoveQuality(moveIdx) {
+  if (!analysisData || moveIdx < 1 || moveIdx > analysisData.length) return null;
+  const cur = analysisData[moveIdx - 1];
+  if (moveIdx === 1) return 'neutral';
+  const prev = analysisData[moveIdx - 2];
+  // Value is from current player's perspective - a drop means a blunder
+  // But players alternate, so we need to account for sign flip
+  const delta = cur.value_estimate - prev.value_estimate;
+  // Determine which player made this move
+  const moveEntry = moveOrder.find(m => m.num === moveIdx);
+  if (!moveEntry) return 'neutral';
+  // For P0, positive value is good. For P1, negative value is good.
+  // A move is a blunder if value shifted AGAINST the player who just moved.
+  const playerSign = moveEntry.player === 0 ? 1 : -1;
+  const effectiveDelta = delta * playerSign;
+  if (effectiveDelta < -0.2) return 'blunder';
+  if (effectiveDelta > 0.05) return 'good';
+  return 'neutral';
+}
 
 // ---------------------------------------------------------------------------
 // HiDPI canvas helper
@@ -2044,31 +2150,107 @@ function drawHex() {
     }
   }
 
+  // Build quality lookup for overlay
+  const qualityMap = {};
+  if (overlayMode.value && analysisData) {
+    for (const mv of moveOrder) {
+      qualityMap[mv.q + ',' + mv.r] = getMoveQuality(mv.num);
+    }
+  }
+
+  // Build threat set for overlay (cells with 4+ threats at current move)
+  const threatCells = new Set();
+  if (overlayMode.threat && analysisData && replayMoveIdx > 0 && replayMoveIdx <= analysisData.length) {
+    const ad = analysisData[replayMoveIdx - 1];
+    if (ad && ad.top_moves) {
+      for (const tm of ad.top_moves) {
+        threatCells.add(tm[0] + ',' + tm[1]);
+      }
+    }
+    // Mark empty cells near threats
+    if (ad && ad.threat_count >= 4) {
+      // Highlight the stone itself
+      const mv = moveOrder.find(m => m.num === replayMoveIdx);
+      if (mv) threatCells.add(mv.q + ',' + mv.r);
+    }
+  }
+
   // P0: solid black hexagons
   for (const [q, r] of stones0) {
     const [sx, sy] = toS(q, r);
+    const key = q + ',' + r;
     hexPath(sx, sy, hr);
-    ctx.fillStyle = '#000'; ctx.fill();
+    // Quality overlay: tint the fill color
+    const qual = qualityMap[key];
+    if (qual === 'blunder') {
+      ctx.fillStyle = '#c00'; ctx.fill();
+    } else if (qual === 'good') {
+      ctx.fillStyle = '#070'; ctx.fill();
+    } else {
+      ctx.fillStyle = '#000'; ctx.fill();
+    }
     ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+    // Threat overlay ring
+    if (overlayMode.threat && threatCells.has(key)) {
+      hexPath(sx, sy, hr + 3 * sc);
+      ctx.strokeStyle = '#f80'; ctx.lineWidth = 2.5; ctx.stroke();
+    }
   }
 
   // P1: white hexagons with hatching
   for (const [q, r] of stones1) {
     const [sx, sy] = toS(q, r);
+    const key = q + ',' + r;
     hexPath(sx, sy, hr);
-    ctx.fillStyle = '#fff'; ctx.fill();
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.2; ctx.stroke();
-    ctx.save();
-    hexPath(sx, sy, hr); ctx.clip();
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 0.6;
-    const step = Math.max(3, 4 * sc);
-    for (let d = -hr * 2; d <= hr * 2; d += step) {
-      ctx.beginPath();
-      ctx.moveTo(sx + d - hr, sy - hr);
-      ctx.lineTo(sx + d + hr, sy + hr);
-      ctx.stroke();
+    // Quality overlay: tint the fill color
+    const qual = qualityMap[key];
+    if (qual === 'blunder') {
+      ctx.fillStyle = '#fcc'; ctx.fill();
+    } else if (qual === 'good') {
+      ctx.fillStyle = '#cfc'; ctx.fill();
+    } else {
+      ctx.fillStyle = '#fff'; ctx.fill();
     }
-    ctx.restore();
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.2; ctx.stroke();
+    // Hatching (skip if quality-colored for clarity)
+    if (!qual || qual === 'neutral') {
+      ctx.save();
+      hexPath(sx, sy, hr); ctx.clip();
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 0.6;
+      const step = Math.max(3, 4 * sc);
+      for (let d = -hr * 2; d <= hr * 2; d += step) {
+        ctx.beginPath();
+        ctx.moveTo(sx + d - hr, sy - hr);
+        ctx.lineTo(sx + d + hr, sy + hr);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    // Threat overlay ring
+    if (overlayMode.threat && threatCells.has(key)) {
+      hexPath(sx, sy, hr + 3 * sc);
+      ctx.strokeStyle = '#f80'; ctx.lineWidth = 2.5; ctx.stroke();
+    }
+  }
+
+  // Threat overlay: show top MCTS candidate moves on empty cells
+  if (overlayMode.threat && analysisData && replayMoveIdx > 0 && replayMoveIdx <= analysisData.length) {
+    const ad = analysisData[replayMoveIdx - 1];
+    if (ad && ad.top_moves) {
+      for (const tm of ad.top_moves) {
+        const tmKey = tm[0] + ',' + tm[1];
+        if (!stoneSet.has(tmKey)) {
+          const [sx, sy] = toS(tm[0], tm[1]);
+          const sz = Math.max(3, hr * 0.4 * Math.sqrt(tm[2]));
+          ctx.fillStyle = 'rgba(255,136,0,0.5)';
+          ctx.beginPath(); ctx.arc(sx, sy, sz, 0, Math.PI * 2); ctx.fill();
+          // Show probability
+          ctx.fillStyle = '#f80'; ctx.font = Math.max(6, hr * 0.35) + 'px Courier New';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+          ctx.fillText((tm[2] * 100).toFixed(0) + '%', sx, sy + sz + 1);
+        }
+      }
+    }
   }
 
   // Move numbers on stones
@@ -2081,6 +2263,16 @@ function drawHex() {
       ctx.fillStyle = mv.player === 0 ? '#fff' : '#000';
       ctx.fillText(mv.num, sx, sy);
     }
+  }
+
+  // Update analysis label
+  if (analysisData && replayMoveIdx > 0 && replayMoveIdx <= analysisData.length) {
+    const ad = analysisData[replayMoveIdx - 1];
+    const valStr = ad.value_estimate != null ? 'V:' + ad.value_estimate.toFixed(2) : '';
+    const thrStr = ad.threat_count != null ? ' T:' + ad.threat_count : '';
+    el('analysis-label').textContent = valStr + thrStr;
+  } else {
+    el('analysis-label').textContent = '';
   }
 }
 
@@ -2124,6 +2316,7 @@ function replayAdvance() {
   replayMoveIdx++;
   rebuildBoard(moves, replayMoveIdx);
   drawHex();
+  if (overlayMode.value && analysisData) drawValueChart();
   setInfo('Game #' + d.game_idx + ' \u2014 Move ' + replayMoveIdx + '/' + moves.length +
     (replayPaused ? ' [PAUSED]' : ''));
 }
@@ -2134,6 +2327,10 @@ function replayGame(d) {
   currentGameData = d;
   replayMoveIdx = 0;
   stones0 = []; stones1 = []; moveOrder = [];
+  // Set analysis data (may be null if not available)
+  analysisData = d._analysis || d.analysis || null;
+  const vcw = el('value-chart-wrap');
+  if (vcw) vcw.style.display = (overlayMode.value && analysisData) ? '' : 'none';
   drawHex();
   el('game-num').textContent = d.game_idx;
   setInfo('Game #' + d.game_idx + ' playing... (' + d.moves.length + ' moves)');
@@ -2172,6 +2369,7 @@ document.addEventListener('keydown', e => {
       replayMoveIdx++;
       rebuildBoard(currentGameData.moves, replayMoveIdx);
       drawHex();
+      if (overlayMode.value && analysisData) drawValueChart();
       setInfo('Game #' + currentGameData.game_idx + ' \u2014 Move ' + replayMoveIdx + '/' + currentGameData.moves.length + ' [PAUSED]');
     }
   }
@@ -2184,11 +2382,18 @@ document.addEventListener('keydown', e => {
       replayMoveIdx--;
       rebuildBoard(currentGameData.moves, replayMoveIdx);
       drawHex();
+      if (overlayMode.value && analysisData) drawValueChart();
       setInfo('Game #' + currentGameData.game_idx + ' \u2014 Move ' + replayMoveIdx + '/' + currentGameData.moves.length + ' [PAUSED]');
     }
   }
   if (e.code === 'KeyR' && currentGameData) {
     replayGame(currentGameData);
+  }
+  if (e.code === 'KeyV') {
+    toggleOverlay('value');
+  }
+  if (e.code === 'KeyT') {
+    toggleOverlay('threat');
   }
 });
 
@@ -2239,6 +2444,8 @@ socket.on('game_complete', d => {
     const lsW1 = el('ls-w1'); if (lsW1 && gameStats.count) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
     // History + replay (NEVER interrupt a playing game)
     if (d.moves && d.moves.length) {
+      // Store analysis data if present
+      d._analysis = d.analysis || null;
       addToHistory(d);
       if (replayBusy) {
         pendingGame = d;  // just queue the latest, current game plays to end
@@ -2257,6 +2464,8 @@ socket.on('stats_update', d => {
     }
     if (d.total_games != null) el('s-games').textContent = d.total_games;
     if (d.current_elo != null) el('s-elo').textContent = Math.round(d.current_elo);
+    if (d.best_elo != null) el('s-best-elo').textContent = Math.round(d.best_elo);
+    if (d.best_iteration != null) el('s-best-iter').textContent = d.best_iteration;
     if (d.workers != null) el('ls-workers').textContent = d.workers;
     if (d.win_p0 != null) el('s-w0').textContent = Math.round(d.win_p0);
     if (d.win_p1 != null) el('s-w1').textContent = Math.round(d.win_p1);
@@ -2373,7 +2582,6 @@ function drawLineChart(cv, datasets, opts) {
 // ---------------------------------------------------------------------------
 function fetchCharts() {
   fetch('/api/elo').then(r => r.json()).then(data => {
-    // Handle both formats: plain array or { elo_history: [...] }
     const arr = Array.isArray(data) ? data : (data.elo_history || []);
     if (!arr.length) return;
     drawLineChart(el('elo-chart'),
@@ -2499,11 +2707,10 @@ function stopTraining() {
   });
 }
 
-// Training config
+// --- Training config ---
 function updateConfig(key, value) {
   const body = {}; body[key] = value;
-  fetch('/api/config', {
-    method: 'POST',
+  fetch('/api/config', { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   }).then(r => r.json()).then(d => {
@@ -2512,7 +2719,6 @@ function updateConfig(key, value) {
     setTimeout(() => { if (s) s.textContent = ''; }, 3000);
   });
 }
-
 function loadConfig() {
   fetch('/api/config').then(r => r.json()).then(d => {
     if (d.search) {

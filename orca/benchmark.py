@@ -260,6 +260,67 @@ def bench_search() -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# 4b. GPU Self-play (threaded, CUDA only)
+# ---------------------------------------------------------------------------
+
+def bench_gpu_selfplay(n_games=3) -> Dict:
+    """GPU-accelerated self-play with shared inference server."""
+    import torch
+    from bot import get_device
+
+    device = get_device()
+    if device.type != 'cuda':
+        return {'skipped': True, 'reason': f'Not CUDA (device={device})'}
+
+    from orca.gpu_server import GPUInferenceServer
+    from orca.search import BatchedMCTS
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import io, contextlib, threading
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        from orca.data import self_play_game_v2
+
+    net, loaded = _load_checkpoint_net(device)
+    server = GPUInferenceServer(net, device=str(device), batch_size=64)
+    server.start()
+    mcts = BatchedMCTS(net, num_simulations=50, batch_size=64)
+
+    times = []
+    lengths = []
+
+    def _play(i):
+        t0 = time.perf_counter()
+        with contextlib.redirect_stdout(io.StringIO()):
+            samples, moves, *_ = self_play_game_v2(net, mcts)
+        return time.perf_counter() - t0, len(moves)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [pool.submit(_play, i) for i in range(n_games)]
+        for f in as_completed(futs):
+            try:
+                t, l = f.result()
+                times.append(t)
+                lengths.append(l)
+            except Exception:
+                pass
+
+    server.stop()
+    total = sum(times)
+    n = len(times)
+    return {
+        'games': n,
+        'total_time': total,
+        'avg_time_per_game': total / max(n, 1),
+        'games_per_hour': n / total * 3600 if total > 0 else 0,
+        'avg_game_length': sum(lengths) / max(n, 1),
+        'checkpoint_loaded': loaded,
+        'gpu_evals': server.total_evaluations,
+        'gpu_batches': server.total_batches,
+        'avg_batch_size': server.avg_batch_size,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 5. Self-play benchmarks
 # ---------------------------------------------------------------------------
 
@@ -482,8 +543,19 @@ def print_report(results: Dict, device_info: Dict):
     if 'selfplay' in results:
         sp = results['selfplay']
         ckpt = "checkpoint" if sp.get('checkpoint_loaded') else "random weights"
-        print(f"|  SELF-PLAY (50 sims, {ckpt})".ljust(W - 1) + "|")
+        print(f"|  SELF-PLAY (50 sims, process-based, {ckpt})".ljust(W - 1) + "|")
         print(f"|    {sp['avg_time_per_game']:.1f}s/game  {sp['avg_game_length']:.0f} moves  {sp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
+        print("|" + "-" * (W - 2) + "|")
+
+    if 'gpu_selfplay' in results:
+        gsp = results['gpu_selfplay']
+        if gsp.get('skipped'):
+            print(f"|  GPU SELF-PLAY: skipped ({gsp.get('reason', 'not CUDA')})".ljust(W - 1) + "|")
+        else:
+            ckpt = "checkpoint" if gsp.get('checkpoint_loaded') else "random weights"
+            print(f"|  GPU SELF-PLAY (50 sims, threaded, {ckpt})".ljust(W - 1) + "|")
+            print(f"|    {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} moves  {gsp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
+            print(f"|    GPU: {gsp.get('gpu_evals', 0)} evals, avg batch={gsp.get('avg_batch_size', 0):.1f}".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
     # Training
@@ -560,7 +632,7 @@ Examples:
         device_info['gpu'] = 'Apple MPS'
 
     sections = args.section.lower().split(',') if args.section != 'all' else [
-        'engine', 'nn', 'latency', 'search', 'selfplay', 'training', 'augmentation', 'replay'
+        'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay', 'training', 'augmentation', 'replay'
     ]
 
     results = {}
@@ -582,6 +654,9 @@ Examples:
         elif section == 'selfplay':
             n = 1 if args.quick else 3
             results['selfplay'] = bench_selfplay(n)
+        elif section == 'gpu_selfplay':
+            n = 1 if args.quick else 3
+            results['gpu_selfplay'] = bench_gpu_selfplay(n)
         elif section == 'training':
             n = 5 if args.quick else 20
             results['training'] = bench_training(n)
