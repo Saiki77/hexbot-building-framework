@@ -33,6 +33,23 @@ def _fmt(n):
     return f"{n:,.1f}"
 
 
+def _load_checkpoint_net(device):
+    """Load the actual Orca checkpoint for realistic benchmarks."""
+    from orca.network import create_network
+    from bot import get_device
+    try:
+        from orca import Orca
+        bot = Orca.load(sims=1)
+        net = bot._net.to(device)
+        net.eval()
+        return net, True
+    except Exception:
+        # Fallback to random weights
+        net = create_network('standard').to(device)
+        net.eval()
+        return net, False
+
+
 # ---------------------------------------------------------------------------
 # 1. C Engine benchmarks
 # ---------------------------------------------------------------------------
@@ -214,14 +231,12 @@ def bench_latency() -> Dict:
 def bench_search() -> Dict:
     """MCTS search: sims/sec at different configurations."""
     import torch
-    from orca.network import create_network
     from orca.search import BatchedMCTS
     from orca.encoding import CGameState
     from bot import get_device
 
     device = get_device()
-    net = create_network('standard').to(device)
-    net.eval()
+    net, loaded = _load_checkpoint_net(device)
     results = {}
 
     for sims in [50, 100, 200]:
@@ -249,20 +264,17 @@ def bench_search() -> Dict:
 # ---------------------------------------------------------------------------
 
 def bench_selfplay(n_games=3) -> Dict:
-    """Full self-play pipeline: game generation speed."""
+    """Full self-play pipeline: game generation speed with actual checkpoint."""
     import torch
-    from orca.network import create_network
     from orca.search import BatchedMCTS
     from bot import get_device
 
-    # Import with suppressed output
     import io, contextlib
     with contextlib.redirect_stdout(io.StringIO()):
         from orca.data import self_play_game_v2
 
     device = get_device()
-    net = create_network('standard').to(device)
-    net.eval()
+    net, loaded = _load_checkpoint_net(device)
     mcts = BatchedMCTS(net, num_simulations=50, batch_size=32)
 
     times, lengths, sample_counts = [], [], []
@@ -282,6 +294,7 @@ def bench_selfplay(n_games=3) -> Dict:
         'games_per_hour': n_games / total * 3600,
         'avg_game_length': sum(lengths) / n_games,
         'avg_samples_per_game': sum(sample_counts) / n_games,
+        'checkpoint_loaded': loaded,
     }
 
 
@@ -468,7 +481,8 @@ def print_report(results: Dict, device_info: Dict):
     # Self-play
     if 'selfplay' in results:
         sp = results['selfplay']
-        print(f"|  SELF-PLAY (50 sims)".ljust(W - 1) + "|")
+        ckpt = "checkpoint" if sp.get('checkpoint_loaded') else "random weights"
+        print(f"|  SELF-PLAY (50 sims, {ckpt})".ljust(W - 1) + "|")
         print(f"|    {sp['avg_time_per_game']:.1f}s/game  {sp['avg_game_length']:.0f} moves  {sp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
@@ -539,7 +553,9 @@ Examples:
     }
     if device.type == 'cuda':
         device_info['gpu'] = torch.cuda.get_device_name(0)
-        device_info['vram_gb'] = round(torch.cuda.get_device_properties(0).total_mem / 1e9, 1)
+        props = torch.cuda.get_device_properties(0)
+        vram = getattr(props, 'total_memory', getattr(props, 'total_mem', 0))
+        device_info['vram_gb'] = round(vram / 1e9, 1)
     elif device.type == 'mps':
         device_info['gpu'] = 'Apple MPS'
 
