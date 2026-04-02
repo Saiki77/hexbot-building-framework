@@ -1020,8 +1020,8 @@ def _print_markdown_summary(results: Dict, device_info: Dict):
             if c['sims'] == 50:
                 metrics.append(('C MCTS speedup (50s)', f"{c['speedup']:.2f}x"))
 
-    # Score: games/hr at 50 sims (the universal comparison number)
-    score = int(sp.get('games_per_hour', 0)) if sp else 0
+    # Score: pos/sec at 50 sims (stable across runs unlike games/hr)
+    score_pps = sp.get('positions_per_sec', 0) if sp else 0
 
     # Network info
     net_params = nn.get('standard_params', 0)
@@ -1032,7 +1032,7 @@ def _print_markdown_summary(results: Dict, device_info: Dict):
     print(f"## Hexbot Benchmark Results")
     print(f"- **Platform**: {cpu}, {ram}GB RAM, {gpu}")
     print(f"- **Network**: {net_name} ({net_params:,} params)")
-    print(f"- **Score**: {score:,} games/hr at 50 sims")
+    print(f"- **Score**: {score_pps:.1f} pos/sec at 50 sims")
     print()
     print(f"| Metric | Value |")
     print(f"|--------|-------|")
