@@ -1276,8 +1276,17 @@ class OrcaTrainer:
         collected_samples = []
         worker_errors = 0
 
-        if use_v2 and self.device.type == 'cuda':
-            # Threaded self-play: shared GPU network (CUDA only, MPS has GIL issues)
+        # Threaded self-play: C MCTS works on any GPU (GIL-free tree ops)
+        # Python BatchedMCTS only works well on CUDA (GIL contention on MPS)
+        _has_c_mcts = False
+        try:
+            from orca.c_mcts import CMCTSSearch
+            _has_c_mcts = True
+        except Exception:
+            pass
+
+        if use_v2 and (self.device.type == 'cuda' or
+                       (self.device.type == 'mps' and _has_c_mcts)):
             return self._run_gpu_self_play(
                 current_sims, current_games, all_positions, replay_buffer)
 

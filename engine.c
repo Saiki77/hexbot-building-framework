@@ -2971,11 +2971,11 @@ int mcts_get_policy(MCTSTree *t, float temperature,
     MCTSNodeC *root = &t->nodes[0];
     if (root->n_children == 0) return 0;
 
-    float total = 0.0f;
     int n = root->n_children;
     float probs[1200];
+    float total = 0.0f;
 
-    if (temperature < 1e-8f) {
+    if (temperature < 0.05f) {
         /* Greedy: pick highest visit count */
         int best_i = 0;
         int best_v = 0;
@@ -2989,10 +2989,18 @@ int mcts_get_policy(MCTSTree *t, float temperature,
         for (int i = 0; i < n; i++) probs[i] = 0.0f;
         probs[best_i] = 1.0f;
     } else {
+        /* Use log-space to avoid overflow: log(v^(1/T)) = (1/T)*log(v) */
         float inv_temp = 1.0f / temperature;
+        float max_log = -1e30f;
         for (int i = 0; i < n; i++) {
             int ci = t->child_pool[root->children_start + i];
-            probs[i] = powf((float)t->nodes[ci].visit_count, inv_temp);
+            float vc = (float)t->nodes[ci].visit_count;
+            probs[i] = (vc > 0) ? inv_temp * logf(vc) : -1e30f;
+            if (probs[i] > max_log) max_log = probs[i];
+        }
+        /* Softmax-style normalization */
+        for (int i = 0; i < n; i++) {
+            probs[i] = expf(probs[i] - max_log);
             total += probs[i];
         }
         if (total > 1e-30f) {

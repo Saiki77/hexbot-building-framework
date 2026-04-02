@@ -264,15 +264,23 @@ def bench_search() -> Dict:
 # ---------------------------------------------------------------------------
 
 def bench_gpu_selfplay(n_games=3) -> Dict:
-    """Threaded self-play with shared network. Best on CUDA, slower on MPS."""
+    """Threaded self-play with shared network. Uses C MCTS on all GPUs."""
     import torch
     from bot import get_device
 
     device = get_device()
-    if device.type != 'cuda':
-        return {'skipped': True, 'reason': f'CUDA only (device={device}, MPS has GIL issues)'}
+    if device.type not in ('cuda', 'mps'):
+        return {'skipped': True, 'reason': f'GPU required (device={device})'}
 
-    from orca.search import BatchedMCTS
+    # Use C MCTS (GIL-free) if available — enables MPS threaded
+    use_c_mcts = False
+    try:
+        from orca.c_mcts import CMCTSSearch
+        use_c_mcts = True
+    except Exception:
+        if device.type != 'cuda':
+            return {'skipped': True, 'reason': f'C MCTS unavailable, MPS needs GIL-free tree ops'}
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import io, contextlib
 
@@ -280,7 +288,11 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
         from orca.data import self_play_game_v2
 
     net, loaded = _load_checkpoint_net(device)
-    mcts = BatchedMCTS(net, num_simulations=50, batch_size=64)
+    if use_c_mcts:
+        mcts = CMCTSSearch(net, num_simulations=50, batch_size=64)
+    else:
+        from orca.search import BatchedMCTS
+        mcts = BatchedMCTS(net, num_simulations=50, batch_size=64)
 
     # Measure wall-clock time for all games (parallel)
     times = []

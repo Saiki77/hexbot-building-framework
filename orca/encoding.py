@@ -450,6 +450,7 @@ class CGameState:
         new._ptr = ctypes.cast(new._buf, ctypes.c_void_p)
         self._lib.board_copy(new._ptr, self._ptr)
         new.max_total_stones = self.max_total_stones
+        new._move_log = list(self._move_log)
         return new
 
 
