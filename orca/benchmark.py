@@ -861,8 +861,9 @@ def print_report(results: Dict, device_info: Dict):
         sp = results['selfplay']
         ckpt = "checkpoint" if sp.get('checkpoint_loaded') else "random weights"
         pps = sp.get('positions_per_sec', 0)
-        print(f"|  SELF-PLAY (50 sims, process-based, {ckpt})".ljust(W - 1) + "|")
-        print(f"|    {sp['avg_time_per_game']:.1f}s/game  {sp['avg_game_length']:.0f} moves  {sp['games_per_hour']:.0f} games/hr  {pps:.1f} pos/s".ljust(W - 1) + "|")
+        n_g = sp.get('games', 0)
+        print(f"|  SELF-PLAY (50 sims, process-based, {ckpt}, {n_g} games)".ljust(W - 1) + "|")
+        print(f"|    {pps:.1f} pos/s  {sp['games_per_hour']:.0f} games/hr  {sp['avg_time_per_game']:.1f}s/game  {sp['avg_game_length']:.0f} avg moves".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
     if 'gpu_selfplay' in results:
@@ -873,8 +874,9 @@ def print_report(results: Dict, device_info: Dict):
             ckpt = "checkpoint" if gsp.get('checkpoint_loaded') else "random weights"
             factor = gsp.get('throughput_factor', 0)
             pps = gsp.get('positions_per_sec', 0)
-            print(f"|  THREADED SELF-PLAY (50 sims, C MCTS, shared GPU, {ckpt})".ljust(W - 1) + "|")
-            print(f"|    {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} moves  {gsp['games_per_hour']:.0f} games/hr  {pps:.1f} pos/s".ljust(W - 1) + "|")
+            n_g = gsp.get('games', 0)
+            print(f"|  THREADED SELF-PLAY (50 sims, C MCTS, shared GPU, {ckpt}, {n_g} games)".ljust(W - 1) + "|")
+            print(f"|    {pps:.1f} pos/s  {gsp['games_per_hour']:.0f} games/hr  {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} avg moves".ljust(W - 1) + "|")
             print(f"|    wall={gsp['wall_time']:.1f}s for {gsp['games']} games  parallelism={factor:.1f}x".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
@@ -882,8 +884,9 @@ def print_report(results: Dict, device_info: Dict):
         csp = results['cpu_selfplay']
         ckpt = "checkpoint" if csp.get('checkpoint_loaded') else "random weights"
         pps = csp.get('positions_per_sec', 0)
-        print(f"|  CPU SELF-PLAY (50 sims, forced CPU, {ckpt})".ljust(W - 1) + "|")
-        print(f"|    {csp['avg_time_per_game']:.1f}s/game  {csp['avg_game_length']:.0f} moves  {csp['games_per_hour']:.0f} games/hr  {pps:.1f} pos/s".ljust(W - 1) + "|")
+        n_g = csp.get('games', 0)
+        print(f"|  CPU SELF-PLAY (50 sims, forced CPU, {ckpt}, {n_g} games)".ljust(W - 1) + "|")
+        print(f"|    {pps:.1f} pos/s  {csp['games_per_hour']:.0f} games/hr  {csp['avg_time_per_game']:.1f}s/game  {csp['avg_game_length']:.0f} avg moves".ljust(W - 1) + "|")
         # Show comparison if we have the main selfplay result
         if 'selfplay' in results:
             sp = results['selfplay']
@@ -933,12 +936,12 @@ def print_report(results: Dict, device_info: Dict):
 
     if len(sp_modes) >= 2:
         print("|" + "-" * (W - 2) + "|")
-        print(f"|  SELF-PLAY COMPARISON".ljust(W - 1) + "|")
-        print(f"|  {'Mode':<22} {'Games/hr':>10} {'Sec/game':>10} {'Avg moves':>10} {'Pos/sec':>10}".ljust(W - 1) + "|")
-        best_gph = max(m[1] for m in sp_modes)
+        print(f"|  SELF-PLAY COMPARISON (pos/sec = stable metric, games/hr varies with game length)".ljust(W - 1) + "|")
+        print(f"|  {'Mode':<22} {'Pos/sec':>10} {'Games/hr':>10} {'Sec/game':>10} {'Avg moves':>10}".ljust(W - 1) + "|")
+        best_pps = max(m[4] for m in sp_modes)
         for name, gph, spg, avg_len, pps in sp_modes:
-            marker = " <-- best" if gph == best_gph else ""
-            print(f"|    {name:<20} {gph:>10.0f} {spg:>10.1f} {avg_len:>10.0f} {pps:>10.1f}{marker}".ljust(W - 1) + "|")
+            marker = " <-- best" if pps == best_pps else ""
+            print(f"|    {name:<20} {pps:>10.1f} {gph:>10.0f} {spg:>10.1f} {avg_len:>10.0f}{marker}".ljust(W - 1) + "|")
 
     # Scaling test
     if 'scaling' in results:
@@ -1111,16 +1114,16 @@ Sections: engine, nn, latency, search, selfplay, gpu_selfplay, cpu_selfplay,
             elif section == 'search':
                 results['search'] = bench_search()
             elif section == 'selfplay':
-                n = 3 if is_quick else 10
+                n = 5 if is_quick else 20
                 results['selfplay'] = bench_selfplay(n)
             elif section == 'gpu_selfplay':
-                n = 3 if is_quick else 10
+                n = 5 if is_quick else 20
                 results['gpu_selfplay'] = bench_gpu_selfplay(n)
             elif section == 'cpu_selfplay':
                 n = 3 if is_quick else 5
                 results['cpu_selfplay'] = bench_cpu_selfplay(n)
             elif section == 'scaling':
-                n = 2 if is_quick else 3
+                n = 3 if is_quick else 5
                 results['scaling'] = bench_selfplay_scaling(n)
             elif section == 'mcts_compare':
                 results['mcts_compare'] = bench_mcts_compare()
