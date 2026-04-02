@@ -136,25 +136,26 @@ class CMCTSSearch:
         except Exception:
             pass
 
-        # Create C tree
+        # Create C tree — cap batch_size to sim count (no point sending
+        # 64 positions when we only need 50 sims total)
+        effective_bs = min(self.batch_size, self.num_simulations)
         tree = lib.mcts_tree_new(
             game._ptr,
             ctypes.c_float(self.c_puct),
-            ctypes.c_int(self.batch_size),
+            ctypes.c_int(effective_bs),
         )
         if not tree:
             return {}
 
-        enc_size = self.batch_size * NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE
         first_batch = True
 
         try:
             sims_done = 0
             while sims_done < self.num_simulations:
-                batch = min(self.batch_size, self.num_simulations - sims_done)
+                batch = min(effective_bs, self.num_simulations - sims_done)
                 n_leaves = lib.mcts_select_batch(tree, batch)
 
-                # Apply Dirichlet noise after first expansion (root is now expanded)
+                # Apply Dirichlet noise after first expansion
                 if first_batch and add_noise:
                     n_ch = lib.mcts_root_child_count(tree)
                     if n_ch > 0:

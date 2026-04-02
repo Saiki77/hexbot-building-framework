@@ -2527,6 +2527,14 @@ typedef struct {
     int16_t   *leaf_oq;      /* encoding offsets */
     int16_t   *leaf_or;
     int8_t    *leaf_player;
+
+    /* Position evaluation cache (zhash -> node_idx that was already expanded) */
+    /* Avoids re-evaluating the same position via different move orders */
+    #define MCTS_CACHE_SIZE (1 << 16)  /* 64K entries */
+    #define MCTS_CACHE_MASK (MCTS_CACHE_SIZE - 1)
+    uint64_t  *cache_keys;
+    float     *cache_values;   /* stored NN value for this position */
+    int        cache_hits;
 } MCTSTree;
 
 /* --- Lifecycle --- */
@@ -2550,6 +2558,10 @@ MCTSTree *mcts_tree_new(Board *root_board, float c_puct, int batch_max) {
     t->leaf_oq = (int16_t *)calloc(batch_max, sizeof(int16_t));
     t->leaf_or = (int16_t *)calloc(batch_max, sizeof(int16_t));
     t->leaf_player = (int8_t *)calloc(batch_max, sizeof(int8_t));
+
+    t->cache_keys = (uint64_t *)calloc(MCTS_CACHE_SIZE, sizeof(uint64_t));
+    t->cache_values = (float *)calloc(MCTS_CACHE_SIZE, sizeof(float));
+    t->cache_hits = 0;
 
     memcpy(&t->board, root_board, sizeof(Board));
     memcpy(&t->root_board, root_board, sizeof(Board));
@@ -2597,6 +2609,8 @@ void mcts_tree_destroy(MCTSTree *t) {
     free(t->leaf_oq);
     free(t->leaf_or);
     free(t->leaf_player);
+    free(t->cache_keys);
+    free(t->cache_values);
     free(t);
 }
 

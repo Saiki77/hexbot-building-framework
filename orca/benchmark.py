@@ -297,9 +297,8 @@ def bench_latency() -> Dict:
 # ---------------------------------------------------------------------------
 
 def bench_search() -> Dict:
-    """MCTS search: sims/sec at different configurations."""
+    """MCTS search: sims/sec at different configurations (uses C MCTS when available)."""
     import torch
-    from orca.search import BatchedMCTS
     from orca.encoding import CGameState
     from bot import get_device
 
@@ -307,9 +306,19 @@ def bench_search() -> Dict:
     net, loaded = _load_checkpoint_net(device)
     results = {}
 
+    # Use C MCTS if available
+    try:
+        from orca.c_mcts import CMCTSSearch
+        mcts_cls = lambda sims, bs: CMCTSSearch(net, num_simulations=sims, batch_size=bs)
+        results['engine'] = 'c_mcts'
+    except Exception:
+        from orca.search import BatchedMCTS
+        mcts_cls = lambda sims, bs: BatchedMCTS(net, num_simulations=sims, batch_size=bs)
+        results['engine'] = 'python'
+
     for sims in [50, 100, 200]:
         for bs in [8, 32, 64]:
-            mcts = BatchedMCTS(net, num_simulations=sims, batch_size=bs)
+            mcts = mcts_cls(sims, bs)
             game = CGameState(max_total_stones=200)
             game.place_stone(0, 0)
             game.place_stone(1, 0)
