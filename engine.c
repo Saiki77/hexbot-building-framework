@@ -2281,6 +2281,110 @@ void board_encode_state(Board *b, float *output, int *out_offset_q, int *out_off
     /* Threat channels (5-6) are added by Python's c_encode_state() */
 }
 
+void board_encode_state_full(Board *b, float *output, int *out_offset_q, int *out_offset_r) {
+    /*
+     * Encode board as (7, 19, 19) float tensor — all channels in C.
+     * Planes 0-4: same as board_encode_state()
+     * Plane 5: current player threat map (candidates where max_line >= 4)
+     * Plane 6: opponent threat map (same for opponent)
+     *
+     * This eliminates 200-1200 ctypes round-trips that Python's
+     * c_encode_state() was doing for threat channels.
+     */
+    int total = 7 * NN_SIZE * NN_SIZE;
+    memset(output, 0, total * sizeof(float));
+
+    int p = b->current_player;
+    int cur_val = p + 1;
+    int opp_val = 2 - p;
+
+    /* Compute centroid */
+    int sum_q = 0, sum_r = 0, count = 0;
+    for (int qi = 0; qi < SIZE; qi++) {
+        for (int ri = 0; ri < SIZE; ri++) {
+            if (b->board[qi][ri] != 0) {
+                sum_q += (qi - OFF);
+                sum_r += (ri - OFF);
+                count++;
+            }
+        }
+    }
+    int cq = 0, cr = 0;
+    if (count > 0) {
+        cq = (sum_q >= 0) ? (sum_q + count/2) / count : (sum_q - count/2) / count;
+        cr = (sum_r >= 0) ? (sum_r + count/2) / count : (sum_r - count/2) / count;
+    }
+    int offset_q = cq - NN_HALF;
+    int offset_r = cr - NN_HALF;
+    *out_offset_q = offset_q;
+    *out_offset_r = offset_r;
+
+    float *p0 = output;
+    float *p1 = output + NN_SIZE * NN_SIZE;
+    for (int qi = 0; qi < SIZE; qi++) {
+        for (int ri = 0; ri < SIZE; ri++) {
+            int v = b->board[qi][ri];
+            if (v == 0) continue;
+            int q = qi - OFF, r = ri - OFF;
+            int i = q - offset_q, j = r - offset_r;
+            if (i >= 0 && i < NN_SIZE && j >= 0 && j < NN_SIZE) {
+                if (v == cur_val) p0[i * NN_SIZE + j] = 1.0f;
+                else              p1[i * NN_SIZE + j] = 1.0f;
+            }
+        }
+    }
+
+    /* Plane 2: legal moves */
+    float *p2 = output + 2 * NN_SIZE * NN_SIZE;
+    if (count == 0) {
+        int i = -offset_q, j = -offset_r;
+        if (i >= 0 && i < NN_SIZE && j >= 0 && j < NN_SIZE)
+            p2[i * NN_SIZE + j] = 1.0f;
+    } else {
+        for (int c = 0; c < b->cand_count; c++) {
+            int q = b->cand_qi[c] - OFF;
+            int r = b->cand_ri[c] - OFF;
+            int i = q - offset_q, j = r - offset_r;
+            if (i >= 0 && i < NN_SIZE && j >= 0 && j < NN_SIZE)
+                p2[i * NN_SIZE + j] = 1.0f;
+        }
+    }
+
+    /* Plane 3: current player indicator */
+    float *p3 = output + 3 * NN_SIZE * NN_SIZE;
+    float player_val = (float)p;
+    for (int k = 0; k < NN_SIZE * NN_SIZE; k++) p3[k] = player_val;
+
+    /* Plane 4: stones remaining */
+    float *p4 = output + 4 * NN_SIZE * NN_SIZE;
+    float remaining = (float)(b->stones_per_turn - b->stones_this_turn) / 2.0f;
+    for (int k = 0; k < NN_SIZE * NN_SIZE; k++) p4[k] = remaining;
+
+    /* Plane 5: current player threats, Plane 6: opponent threats */
+    if (count > 0) {
+        float *p5 = output + 5 * NN_SIZE * NN_SIZE;
+        float *p6 = output + 6 * NN_SIZE * NN_SIZE;
+        int opp = 1 - p;
+        for (int c = 0; c < b->cand_count; c++) {
+            int qi = b->cand_qi[c], ri = b->cand_ri[c];
+            int q = qi - OFF, r = ri - OFF;
+            int i = q - offset_q, j = r - offset_r;
+            if (i >= 0 && i < NN_SIZE && j >= 0 && j < NN_SIZE) {
+                int my_l = board_max_line_through(b, qi, ri, p);
+                if (my_l >= 4) {
+                    float v = my_l / 6.0f;
+                    p5[i * NN_SIZE + j] = v < 1.0f ? v : 1.0f;
+                }
+                int opp_l = board_max_line_through(b, qi, ri, opp);
+                if (opp_l >= 4) {
+                    float v = opp_l / 6.0f;
+                    p6[i * NN_SIZE + j] = v < 1.0f ? v : 1.0f;
+                }
+            }
+        }
+    }
+}
+
 int board_get_legal_mask(Board *b, float *mask, int offset_q, int offset_r) {
     /*
      * Fill float[361] with 1.0 for legal moves within 19x19 window.

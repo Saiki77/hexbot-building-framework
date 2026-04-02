@@ -351,6 +351,7 @@ def _setup_c_signatures(lib):
     lib.board_get_candidates.restype = ctypes.c_int
     _FA = ctypes.POINTER(ctypes.c_float)
     lib.board_encode_state.argtypes = [ctypes.c_void_p, _FA, _IA, _IA]
+    lib.board_encode_state_full.argtypes = [ctypes.c_void_p, _FA, _IA, _IA]
     lib.board_get_legal_mask.argtypes = [ctypes.c_void_p, _FA, ctypes.c_int, ctypes.c_int]
     lib.board_get_legal_mask.restype = ctypes.c_int
     lib.board_compute_threat_label.argtypes = [ctypes.c_void_p, _FA]
@@ -359,6 +360,7 @@ def _setup_c_signatures(lib):
 # Pre-allocated ctypes arrays (thread-local would be ideal, but these work for single-threaded)
 _IntArr600 = ctypes.c_int * 1200  # radius 3 generates more candidates
 _FloatArr = ctypes.c_float * (5 * BOARD_SIZE * BOARD_SIZE)
+_FloatArr7 = ctypes.c_float * (7 * BOARD_SIZE * BOARD_SIZE)
 _FloatArr361 = ctypes.c_float * (BOARD_SIZE * BOARD_SIZE)
 _FloatArr4 = ctypes.c_float * 4
 
@@ -452,34 +454,17 @@ class CGameState:
 
 
 def c_encode_state(game: CGameState) -> Tuple[torch.Tensor, int, int]:
-    """Encode CGameState using C engine + Python threat channels."""
-    buf = _FloatArr()
+    """Encode CGameState as (7, 19, 19) tensor — all 7 channels in one C call.
+
+    Uses board_encode_state_full() which computes threat channels 5-6
+    entirely in C, eliminating 200-1200 ctypes round-trips per encode.
+    """
+    buf = _FloatArr7()
     oq = ctypes.c_int(0)
     orr = ctypes.c_int(0)
-    game._lib.board_encode_state(game._ptr, buf, ctypes.byref(oq), ctypes.byref(orr))
-    arr5 = np.ctypeslib.as_array(buf).reshape(5, BOARD_SIZE, BOARD_SIZE).copy()
-
-    # Add 2 threat channels (planes 5-6) in Python
-    arr = np.zeros((NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
-    arr[:5] = arr5
-
-    # Threat planes: use C engine's line counting
-    offset_q, offset_r = oq.value, orr.value
-    player = game.current_player
-    cands = game.candidates
-    if cands:
-        for q, r in cands:
-            i, j = q - offset_q, r - offset_r
-            if 0 <= i < BOARD_SIZE and 0 <= j < BOARD_SIZE:
-                qi, ri = q + 15, r + 15  # C engine uses OFF=15
-                my_l = game._lib.board_max_line_through(game._ptr, qi, ri, player)
-                opp_l = game._lib.board_max_line_through(game._ptr, qi, ri, 1 - player)
-                if my_l >= 4:
-                    arr[5, i, j] = min(my_l / 6.0, 1.0)
-                if opp_l >= 4:
-                    arr[6, i, j] = min(opp_l / 6.0, 1.0)
-
-    return torch.from_numpy(arr), offset_q, offset_r
+    game._lib.board_encode_state_full(game._ptr, buf, ctypes.byref(oq), ctypes.byref(orr))
+    arr = np.ctypeslib.as_array(buf).reshape(NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE).copy()
+    return torch.from_numpy(arr), oq.value, orr.value
 
 
 def c_decode_policy(
