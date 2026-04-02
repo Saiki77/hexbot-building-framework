@@ -1027,18 +1027,23 @@ def main():
         description="Hexbot platform benchmark - compare performance across hardware",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Sections: engine, nn, latency, search, selfplay, gpu_selfplay, cpu_selfplay, scaling, mcts_compare, training, augmentation, replay, all
+Just run: python -m orca.benchmark
 
-Examples:
-  python -m orca.benchmark                     # full benchmark
-  python -m orca.benchmark --quick             # fast subset
-  python -m orca.benchmark --section nn        # just NN inference
-  python -m orca.benchmark --output bench.json # save results
+Modes:
+  (default)   Standard benchmark (~1-2 min) - all the useful sections
+  --full      Everything including slow CPU self-play (~3-5 min)
+  --quick     Minimal test (~30s)
+  --section X Run specific section(s), comma-separated
+
+Sections: engine, nn, latency, search, selfplay, gpu_selfplay, cpu_selfplay,
+           scaling, mcts_compare, training, augmentation, replay
         """)
-    parser.add_argument("--section", type=str, default="all",
-                        help="Which section to run (default: all)")
+    parser.add_argument("--section", type=str, default=None,
+                        help="Specific section(s) to run (comma-separated)")
+    parser.add_argument("--full", action="store_true",
+                        help="Run everything including slow CPU self-play")
     parser.add_argument("--quick", action="store_true",
-                        help="Quick mode (fewer iterations)")
+                        help="Quick mode (~30s, fewer iterations)")
     parser.add_argument("--output", type=str, default=None,
                         help="Save results to JSON file")
     args = parser.parse_args()
@@ -1049,13 +1054,27 @@ Examples:
     device = get_device()
     device_info = _get_system_info()
 
-    sections = args.section.lower().split(',') if args.section != 'all' else [
-        'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay', 'cpu_selfplay',
-        'scaling', 'mcts_compare', 'training', 'augmentation', 'replay',
-    ]
+    if args.section:
+        sections = args.section.lower().split(',')
+    elif args.full:
+        sections = [
+            'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay',
+            'cpu_selfplay', 'scaling', 'mcts_compare', 'training', 'augmentation', 'replay',
+        ]
+    elif args.quick:
+        sections = ['engine', 'nn', 'selfplay', 'mcts_compare']
+    else:
+        # Default: everything useful, skip slow CPU self-play
+        sections = [
+            'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay',
+            'scaling', 'mcts_compare', 'training', 'augmentation', 'replay',
+        ]
+
+    is_quick = args.quick
 
     results = {}
 
+    total_start = time.perf_counter()
     for section in sections:
         section = section.strip()
         print(f"  [{section}]...", end=' ', flush=True)
@@ -1065,28 +1084,28 @@ Examples:
             if section == 'engine':
                 results['engine'] = bench_engine()
             elif section == 'nn':
-                configs = ['fast', 'standard'] if args.quick else None
+                configs = ['fast', 'standard'] if is_quick else None
                 results['nn'] = bench_nn(configs)
             elif section == 'latency':
                 results['latency'] = bench_latency()
             elif section == 'search':
                 results['search'] = bench_search()
             elif section == 'selfplay':
-                n = 3 if args.quick else 10
+                n = 3 if is_quick else 10
                 results['selfplay'] = bench_selfplay(n)
             elif section == 'gpu_selfplay':
-                n = 3 if args.quick else 10
+                n = 3 if is_quick else 10
                 results['gpu_selfplay'] = bench_gpu_selfplay(n)
             elif section == 'cpu_selfplay':
-                n = 3 if args.quick else 5
+                n = 3 if is_quick else 5
                 results['cpu_selfplay'] = bench_cpu_selfplay(n)
             elif section == 'scaling':
-                n = 2 if args.quick else 3
+                n = 2 if is_quick else 3
                 results['scaling'] = bench_selfplay_scaling(n)
             elif section == 'mcts_compare':
                 results['mcts_compare'] = bench_mcts_compare()
             elif section == 'training':
-                n = 5 if args.quick else 20
+                n = 5 if is_quick else 20
                 results['training'] = bench_training(n)
             elif section == 'augmentation':
                 results['augmentation'] = bench_augmentation()
@@ -1097,6 +1116,9 @@ Examples:
         except Exception as e:
             print(f"ERROR: {e}")
             results[section] = {'skipped': True, 'reason': str(e)}
+
+    total_time = time.perf_counter() - total_start
+    print(f"\n  Total: {total_time:.1f}s")
 
     print_report(results, device_info)
 
