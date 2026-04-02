@@ -1004,7 +1004,6 @@ def _print_markdown_summary(results: Dict, device_info: Dict):
     net_name = 'standard'
 
     print()
-    print("Copy-paste for Discord/GitHub:")
     print("```")
     print(f"## Hexbot Benchmark Results")
     print(f"- **Platform**: {cpu}, {ram}GB RAM, {gpu}")
