@@ -306,6 +306,7 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
 
     wall_time = time.perf_counter() - wall_start
     n = len(times)
+    total_moves = sum(lengths)
     return {
         'games': n,
         'wall_time': wall_time,
@@ -313,6 +314,7 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
         'games_per_hour': n / wall_time * 3600 if wall_time > 0 else 0,
         'throughput_factor': (n / wall_time) / (1 / (sum(times) / max(n, 1))) if times else 0,
         'avg_game_length': sum(lengths) / max(n, 1),
+        'positions_per_sec': total_moves / wall_time if wall_time > 0 else 0,
         'checkpoint_loaded': loaded,
     }
 
@@ -346,12 +348,14 @@ def bench_cpu_selfplay(n_games=3) -> Dict:
         lengths.append(len(moves))
 
     total = sum(times)
+    total_moves = sum(lengths)
     return {
         'games': n_games,
         'total_time': total,
         'avg_time_per_game': total / n_games,
         'games_per_hour': n_games / total * 3600,
         'avg_game_length': sum(lengths) / n_games,
+        'positions_per_sec': total_moves / total if total > 0 else 0,
         'checkpoint_loaded': loaded,
         'device': 'cpu',
     }
@@ -385,6 +389,7 @@ def bench_selfplay(n_games=3) -> Dict:
         sample_counts.append(len(samples))
 
     total = sum(times)
+    total_moves = sum(lengths)
     return {
         'games': n_games,
         'total_time': total,
@@ -392,6 +397,7 @@ def bench_selfplay(n_games=3) -> Dict:
         'games_per_hour': n_games / total * 3600,
         'avg_game_length': sum(lengths) / n_games,
         'avg_samples_per_game': sum(sample_counts) / n_games,
+        'positions_per_sec': total_moves / total if total > 0 else 0,
         'checkpoint_loaded': loaded,
     }
 
@@ -580,8 +586,9 @@ def print_report(results: Dict, device_info: Dict):
     if 'selfplay' in results:
         sp = results['selfplay']
         ckpt = "checkpoint" if sp.get('checkpoint_loaded') else "random weights"
+        pps = sp.get('positions_per_sec', 0)
         print(f"|  SELF-PLAY (50 sims, process-based, {ckpt})".ljust(W - 1) + "|")
-        print(f"|    {sp['avg_time_per_game']:.1f}s/game  {sp['avg_game_length']:.0f} moves  {sp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
+        print(f"|    {sp['avg_time_per_game']:.1f}s/game  {sp['avg_game_length']:.0f} moves  {sp['games_per_hour']:.0f} games/hr  {pps:.1f} pos/s".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
     if 'gpu_selfplay' in results:
@@ -591,16 +598,18 @@ def print_report(results: Dict, device_info: Dict):
         else:
             ckpt = "checkpoint" if gsp.get('checkpoint_loaded') else "random weights"
             factor = gsp.get('throughput_factor', 0)
+            pps = gsp.get('positions_per_sec', 0)
             print(f"|  THREADED SELF-PLAY (50 sims, shared GPU, {ckpt})".ljust(W - 1) + "|")
-            print(f"|    {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} moves  {gsp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
+            print(f"|    {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} moves  {gsp['games_per_hour']:.0f} games/hr  {pps:.1f} pos/s".ljust(W - 1) + "|")
             print(f"|    wall={gsp['wall_time']:.1f}s for {gsp['games']} games  parallelism={factor:.1f}x".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
     if 'cpu_selfplay' in results:
         csp = results['cpu_selfplay']
         ckpt = "checkpoint" if csp.get('checkpoint_loaded') else "random weights"
+        pps = csp.get('positions_per_sec', 0)
         print(f"|  CPU SELF-PLAY (50 sims, forced CPU, {ckpt})".ljust(W - 1) + "|")
-        print(f"|    {csp['avg_time_per_game']:.1f}s/game  {csp['avg_game_length']:.0f} moves  {csp['games_per_hour']:.0f} games/hr".ljust(W - 1) + "|")
+        print(f"|    {csp['avg_time_per_game']:.1f}s/game  {csp['avg_game_length']:.0f} moves  {csp['games_per_hour']:.0f} games/hr  {pps:.1f} pos/s".ljust(W - 1) + "|")
         # Show comparison if we have the main selfplay result
         if 'selfplay' in results:
             sp = results['selfplay']
@@ -640,22 +649,22 @@ def print_report(results: Dict, device_info: Dict):
     sp_modes = []
     if 'selfplay' in results and not results['selfplay'].get('skipped'):
         sp = results['selfplay']
-        sp_modes.append(('Process (GPU)', sp['games_per_hour'], sp['avg_time_per_game'], sp['avg_game_length']))
+        sp_modes.append(('Process (GPU)', sp['games_per_hour'], sp['avg_time_per_game'], sp['avg_game_length'], sp.get('positions_per_sec', 0)))
     if 'gpu_selfplay' in results and not results['gpu_selfplay'].get('skipped'):
         gsp = results['gpu_selfplay']
-        sp_modes.append(('Threaded (GPU)', gsp['games_per_hour'], gsp['avg_time_per_game'], gsp['avg_game_length']))
+        sp_modes.append(('Threaded (GPU)', gsp['games_per_hour'], gsp['avg_time_per_game'], gsp['avg_game_length'], gsp.get('positions_per_sec', 0)))
     if 'cpu_selfplay' in results and not results['cpu_selfplay'].get('skipped'):
         csp = results['cpu_selfplay']
-        sp_modes.append(('Process (CPU)', csp['games_per_hour'], csp['avg_time_per_game'], csp['avg_game_length']))
+        sp_modes.append(('Process (CPU)', csp['games_per_hour'], csp['avg_time_per_game'], csp['avg_game_length'], csp.get('positions_per_sec', 0)))
 
     if len(sp_modes) >= 2:
         print("|" + "-" * (W - 2) + "|")
         print(f"|  SELF-PLAY COMPARISON".ljust(W - 1) + "|")
-        print(f"|  {'Mode':<22} {'Games/hr':>10} {'Sec/game':>10} {'Avg moves':>10}".ljust(W - 1) + "|")
+        print(f"|  {'Mode':<22} {'Games/hr':>10} {'Sec/game':>10} {'Avg moves':>10} {'Pos/sec':>10}".ljust(W - 1) + "|")
         best_gph = max(m[1] for m in sp_modes)
-        for name, gph, spg, avg_len in sp_modes:
+        for name, gph, spg, avg_len, pps in sp_modes:
             marker = " <-- best" if gph == best_gph else ""
-            print(f"|    {name:<20} {gph:>10.0f} {spg:>10.1f} {avg_len:>10.0f}{marker}".ljust(W - 1) + "|")
+            print(f"|    {name:<20} {gph:>10.0f} {spg:>10.1f} {avg_len:>10.0f} {pps:>10.1f}{marker}".ljust(W - 1) + "|")
 
     print("+" + "=" * (W - 2) + "+")
     print()

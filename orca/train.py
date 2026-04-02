@@ -1169,14 +1169,25 @@ class OrcaTrainer:
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from orca.data import self_play_game_v2
-        from orca.search import BatchedMCTS
 
-        print(f"  |  Self-play: threaded ({self.device}, "
-              f"{self.num_workers} threads, {current_sims} sims)...")
+        # Use C MCTS (GIL-free) if available, else fall back to Python
+        use_c_mcts = False
+        try:
+            from orca.c_mcts import CMCTSSearch
+            use_c_mcts = True
+        except Exception:
+            pass
 
-        # Network stays on GPU - shared by all threads (no per-worker loading)
         self.net.eval()
-        mcts = BatchedMCTS(self.net, num_simulations=current_sims, batch_size=64)
+        if use_c_mcts:
+            print(f"  |  Self-play: C MCTS threaded ({self.device}, "
+                  f"{self.num_workers} threads, {current_sims} sims)...")
+            mcts = CMCTSSearch(self.net, num_simulations=current_sims, batch_size=64)
+        else:
+            from orca.search import BatchedMCTS
+            print(f"  |  Self-play: threaded ({self.device}, "
+                  f"{self.num_workers} threads, {current_sims} sims)...")
+            mcts = BatchedMCTS(self.net, num_simulations=current_sims, batch_size=64)
 
         total_samples = 0
         total_moves = 0
