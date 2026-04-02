@@ -1276,17 +1276,10 @@ class OrcaTrainer:
         collected_samples = []
         worker_errors = 0
 
-        # Threaded self-play: C MCTS works on any GPU (GIL-free tree ops)
-        # Python BatchedMCTS only works well on CUDA (GIL contention on MPS)
-        _has_c_mcts = False
-        try:
-            from orca.c_mcts import CMCTSSearch
-            _has_c_mcts = True
-        except Exception:
-            pass
-
-        if use_v2 and (self.device.type == 'cuda' or
-                       (self.device.type == 'mps' and _has_c_mcts)):
+        # Threaded self-play: CUDA only. MPS segfaults with concurrent
+        # forward_pv calls even with C MCTS (MPS backend isn't thread-safe).
+        # C MCTS still helps MPS via the process-based path (2x faster search).
+        if use_v2 and self.device.type == 'cuda':
             return self._run_gpu_self_play(
                 current_sims, current_games, all_positions, replay_buffer)
 

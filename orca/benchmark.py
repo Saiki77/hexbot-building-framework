@@ -410,23 +410,23 @@ def _gpu_selfplay_worker(result_path, n, use_c, device_str):
 
 
 def bench_gpu_selfplay(n_games=3) -> Dict:
-    """Threaded self-play with shared network. Uses C MCTS on all GPUs.
-    Runs in a subprocess so crashes (MPS segfaults) don't kill the benchmark.
+    """Threaded self-play with shared GPU network. CUDA only.
+    MPS segfaults with concurrent forward_pv (not thread-safe).
+    Runs in a subprocess so crashes don't kill the benchmark.
     """
     import torch
     from bot import get_device
 
     device = get_device()
-    if device.type not in ('cuda', 'mps'):
-        return {'skipped': True, 'reason': f'GPU required (device={device})'}
+    if device.type != 'cuda':
+        return {'skipped': True, 'reason': f'CUDA only (MPS not thread-safe for NN inference)'}
 
     use_c_mcts = False
     try:
         from orca.c_mcts import CMCTSSearch
         use_c_mcts = True
     except Exception:
-        if device.type != 'cuda':
-            return {'skipped': True, 'reason': f'C MCTS unavailable, MPS needs GIL-free tree ops'}
+        pass
 
     import multiprocessing as mp
     import tempfile

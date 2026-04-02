@@ -1003,7 +1003,11 @@ def self_play_game_v2(
 
         moves_list = list(policy.keys())
         probs = np.array([policy[m] for m in moves_list], dtype=np.float64)
-        probs /= probs.sum()
+        total = probs.sum()
+        if total > 1e-30:
+            probs /= total
+        else:
+            probs = np.ones(len(moves_list), dtype=np.float64) / len(moves_list)
         idx = np.random.choice(len(moves_list), p=probs)
         chosen = moves_list[idx]
         move_history.append(chosen)
