@@ -2449,3 +2449,571 @@ void board_copy(Board *dst, Board *src) {
 }
 
 int board_get_stones_per_turn(Board *b) { return b->stones_per_turn; }
+
+/* ===================================================================
+ * C MCTS — GIL-free tree search for threaded GPU self-play
+ *
+ * Architecture:
+ *   Python calls mcts_select_batch() → C returns leaf encodings
+ *   Python does batch NN forward_pv() → passes results back
+ *   Python calls mcts_expand_backup() → C expands + backpropagates
+ *   Repeat until num_simulations done
+ *   Python calls mcts_get_policy() → C returns visit distribution
+ *
+ * Each thread gets its own MCTSTree — zero shared state, zero locks.
+ * =================================================================== */
+
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MCTS_MAX_NODES  100000
+#define MCTS_MAX_CHILDREN 1200
+#define MCTS_MAX_PENDING  50000
+#define MCTS_MAX_DEPTH   200
+#define MCTS_NN_PLANES   7
+#define MCTS_NN_SIZE     19
+
+/* Node: 32 bytes, cache-line friendly */
+typedef struct {
+    int32_t  parent;          /* index into nodes[], -1 for root */
+    int16_t  move_q, move_r;  /* axial coords of move leading here */
+    float    prior;
+    float    value_sum;
+    int32_t  visit_count;
+    int8_t   player;          /* current_player when this node is reached */
+    int8_t   is_expanded;
+    int16_t  n_children;
+    int16_t  n_pending;
+    int32_t  children_start;  /* offset into child_pool */
+    int32_t  pending_start;   /* offset into pending_pool */
+} MCTSNodeC;
+
+typedef struct {
+    /* Node storage */
+    MCTSNodeC *nodes;
+    int32_t    node_count;
+
+    /* Child pool: node indices for each parent's children */
+    int32_t   *child_pool;
+    int32_t    child_pool_used;
+
+    /* Pending pool: (q, r, prior) tuples for progressive widening */
+    int16_t   *pend_q;
+    int16_t   *pend_r;
+    float     *pend_prior;
+    int32_t    pend_pool_used;
+
+    /* Board state (copied from root, mutated during select) */
+    Board      board;
+    Board      root_board;   /* pristine copy for reset */
+    int8_t     root_player;
+
+    /* Config */
+    float      c_puct;
+    int        initial_width;
+    int        widen_20, widen_50, widen_100;
+
+    /* Leaf buffer for current batch */
+    float     *leaf_enc;     /* [batch_max * NN_PLANES * NN_SIZE * NN_SIZE] */
+    int32_t   *leaf_node;    /* node index per leaf */
+    int        leaf_count;
+    int        batch_max;
+
+    /* Path buffer per leaf (for re-traversal during expand) */
+    int16_t   *leaf_path_q;  /* [batch_max * MCTS_MAX_DEPTH] */
+    int16_t   *leaf_path_r;
+    int       *leaf_depth;
+    int16_t   *leaf_oq;      /* encoding offsets */
+    int16_t   *leaf_or;
+    int8_t    *leaf_player;
+} MCTSTree;
+
+/* --- Lifecycle --- */
+
+MCTSTree *mcts_tree_new(Board *root_board, float c_puct, int batch_max) {
+    MCTSTree *t = (MCTSTree *)calloc(1, sizeof(MCTSTree));
+    if (!t) return NULL;
+
+    t->nodes = (MCTSNodeC *)calloc(MCTS_MAX_NODES, sizeof(MCTSNodeC));
+    t->child_pool = (int32_t *)calloc(MCTS_MAX_CHILDREN * 100, sizeof(int32_t));
+    t->pend_q = (int16_t *)calloc(MCTS_MAX_PENDING, sizeof(int16_t));
+    t->pend_r = (int16_t *)calloc(MCTS_MAX_PENDING, sizeof(int16_t));
+    t->pend_prior = (float *)calloc(MCTS_MAX_PENDING, sizeof(float));
+
+    int enc_size = batch_max * MCTS_NN_PLANES * MCTS_NN_SIZE * MCTS_NN_SIZE;
+    t->leaf_enc = (float *)calloc(enc_size, sizeof(float));
+    t->leaf_node = (int32_t *)calloc(batch_max, sizeof(int32_t));
+    t->leaf_depth = (int *)calloc(batch_max, sizeof(int));
+    t->leaf_path_q = (int16_t *)calloc(batch_max * MCTS_MAX_DEPTH, sizeof(int16_t));
+    t->leaf_path_r = (int16_t *)calloc(batch_max * MCTS_MAX_DEPTH, sizeof(int16_t));
+    t->leaf_oq = (int16_t *)calloc(batch_max, sizeof(int16_t));
+    t->leaf_or = (int16_t *)calloc(batch_max, sizeof(int16_t));
+    t->leaf_player = (int8_t *)calloc(batch_max, sizeof(int8_t));
+
+    memcpy(&t->board, root_board, sizeof(Board));
+    memcpy(&t->root_board, root_board, sizeof(Board));
+    t->root_player = root_board->current_player;
+    t->c_puct = c_puct;
+    t->batch_max = batch_max;
+    t->initial_width = 6;
+    t->widen_20 = 10;
+    t->widen_50 = 16;
+    t->widen_100 = 25;
+
+    /* Create root node */
+    MCTSNodeC *root = &t->nodes[0];
+    root->parent = -1;
+    root->move_q = root->move_r = 0;
+    root->prior = 0.0f;
+    root->value_sum = 0.0f;
+    root->visit_count = 0;
+    root->player = t->root_player;
+    root->is_expanded = 0;
+    root->n_children = 0;
+    root->n_pending = 0;
+    root->children_start = 0;
+    root->pending_start = 0;
+    t->node_count = 1;
+    t->child_pool_used = 0;
+    t->pend_pool_used = 0;
+    t->leaf_count = 0;
+
+    return t;
+}
+
+void mcts_tree_destroy(MCTSTree *t) {
+    if (!t) return;
+    free(t->nodes);
+    free(t->child_pool);
+    free(t->pend_q);
+    free(t->pend_r);
+    free(t->pend_prior);
+    free(t->leaf_enc);
+    free(t->leaf_node);
+    free(t->leaf_depth);
+    free(t->leaf_path_q);
+    free(t->leaf_path_r);
+    free(t->leaf_oq);
+    free(t->leaf_or);
+    free(t->leaf_player);
+    free(t);
+}
+
+/* --- Helpers --- */
+
+static int mcts_next_player(Board *b, int current_player) {
+    /* After placing a stone, what's the next current_player? */
+    int stt = b->stones_this_turn + 1;
+    int spt = b->stones_per_turn;
+    if (stt >= spt) return 1 - current_player;
+    return current_player;
+}
+
+static int mcts_alloc_node(MCTSTree *t) {
+    if (t->node_count >= MCTS_MAX_NODES) return -1;
+    int idx = t->node_count++;
+    MCTSNodeC *n = &t->nodes[idx];
+    n->parent = -1;
+    n->visit_count = 0;
+    n->value_sum = 0.0f;
+    n->is_expanded = 0;
+    n->n_children = 0;
+    n->n_pending = 0;
+    return idx;
+}
+
+/* --- PUCT Selection --- */
+
+static int mcts_select_child(MCTSTree *t, int node_idx) {
+    MCTSNodeC *node = &t->nodes[node_idx];
+    float sqrt_parent = sqrtf((float)(node->visit_count + 1));
+    float best_score = -1e9f;
+    int best_child = -1;
+
+    for (int i = 0; i < node->n_children; i++) {
+        int ci = t->child_pool[node->children_start + i];
+        MCTSNodeC *child = &t->nodes[ci];
+        float q = (child->visit_count > 0) ?
+            child->value_sum / (float)child->visit_count : 0.0f;
+        if (child->player != node->player) q = -q;
+        float score = q + t->c_puct * child->prior * sqrt_parent
+                      / (1.0f + (float)child->visit_count);
+        if (score > best_score) {
+            best_score = score;
+            best_child = ci;
+        }
+    }
+    return best_child;
+}
+
+/* --- Backup --- */
+
+static void mcts_backup(MCTSTree *t, int node_idx, float value) {
+    while (node_idx >= 0) {
+        MCTSNodeC *n = &t->nodes[node_idx];
+        n->visit_count++;
+        if (n->player == t->root_player)
+            n->value_sum += value;
+        else
+            n->value_sum -= value;
+        node_idx = n->parent;
+    }
+}
+
+/* --- Progressive Widening --- */
+
+static void mcts_widen_node(MCTSTree *t, int node_idx) {
+    MCTSNodeC *node = &t->nodes[node_idx];
+    if (node->n_pending <= 0) return;
+    int n = node->visit_count;
+    int current = node->n_children;
+    int target;
+    if (n >= 100 && current < t->widen_100) target = t->widen_100;
+    else if (n >= 50 && current < t->widen_50) target = t->widen_50;
+    else if (n >= 20 && current < t->widen_20) target = t->widen_20;
+    else return;
+
+    int to_add = target - current;
+    if (to_add > node->n_pending) to_add = node->n_pending;
+
+    /* Figure out next_player for children by looking at board state.
+     * During select, the board is already at this node's state. */
+    for (int i = 0; i < to_add; i++) {
+        int pi = node->pending_start + i;
+        int16_t mq = t->pend_q[pi];
+        int16_t mr = t->pend_r[pi];
+        float prior = t->pend_prior[pi];
+
+        int ci = mcts_alloc_node(t);
+        if (ci < 0) break;
+        MCTSNodeC *child = &t->nodes[ci];
+        child->parent = node_idx;
+        child->move_q = mq;
+        child->move_r = mr;
+        child->prior = prior;
+        child->player = mcts_next_player(&t->board, node->player);
+
+        /* Add to child pool */
+        t->child_pool[node->children_start + node->n_children] = ci;
+        node->n_children++;
+    }
+    /* Shift pending */
+    node->pending_start += to_add;
+    node->n_pending -= to_add;
+}
+
+/* --- SELECT BATCH: the primary hot-path function --- */
+
+int mcts_select_batch(MCTSTree *t, int batch_size) {
+    t->leaf_count = 0;
+    if (batch_size > t->batch_max) batch_size = t->batch_max;
+
+    for (int b = 0; b < batch_size; b++) {
+        /* Reset board to root */
+        memcpy(&t->board, &t->root_board, sizeof(Board));
+        int node_idx = 0;  /* root */
+        int depth = 0;
+
+        /* SELECT: traverse tree via PUCT */
+        while (t->nodes[node_idx].is_expanded && t->board.winner < 0) {
+            MCTSNodeC *node = &t->nodes[node_idx];
+            if (node->n_children <= 0) break;
+
+            /* Progressive widening */
+            if (node->n_pending > 0 && node->visit_count >= 20) {
+                mcts_widen_node(t, node_idx);
+            }
+
+            int child_idx = mcts_select_child(t, node_idx);
+            if (child_idx < 0) break;
+
+            MCTSNodeC *child = &t->nodes[child_idx];
+            board_place(&t->board, child->move_q + OFF, child->move_r + OFF);
+
+            /* Store path for this leaf */
+            int path_off = b * MCTS_MAX_DEPTH;
+            t->leaf_path_q[path_off + depth] = child->move_q;
+            t->leaf_path_r[path_off + depth] = child->move_r;
+
+            node_idx = child_idx;
+            depth++;
+        }
+
+        /* Terminal? */
+        if (t->board.winner >= 0) {
+            float value = (t->board.winner == t->root_player) ? 1.0f : -1.0f;
+            mcts_backup(t, node_idx, value);
+            continue;
+        }
+
+        /* Already expanded (collision)? */
+        if (t->nodes[node_idx].is_expanded) {
+            continue;
+        }
+
+        /* Virtual loss */
+        t->nodes[node_idx].visit_count++;
+
+        /* Encode state for NN */
+        int leaf_idx = t->leaf_count;
+        float *enc = t->leaf_enc + leaf_idx * MCTS_NN_PLANES * MCTS_NN_SIZE * MCTS_NN_SIZE;
+        int oq_val, or_val;
+        board_encode_state_full(&t->board, enc, &oq_val, &or_val);
+
+        t->leaf_node[leaf_idx] = node_idx;
+        t->leaf_depth[leaf_idx] = depth;
+        t->leaf_oq[leaf_idx] = (int16_t)oq_val;
+        t->leaf_or[leaf_idx] = (int16_t)or_val;
+        t->leaf_player[leaf_idx] = (int8_t)t->board.current_player;
+        t->leaf_count++;
+    }
+
+    return t->leaf_count;
+}
+
+/* --- Policy decode in C (mask + softmax + sort) --- */
+
+static void mcts_decode_policy_internal(
+    float *logits_361,
+    Board *b,
+    int offset_q, int offset_r,
+    int16_t *out_move_q, int16_t *out_move_r,
+    float *out_prob, int *out_count
+) {
+    /* Mask logits to legal moves, softmax, sort descending */
+    float masked[1200];
+    int16_t mq[1200], mr[1200];
+    int n = 0;
+
+    if (b->total_stones == 0) {
+        out_move_q[0] = 0;
+        out_move_r[0] = 0;
+        out_prob[0] = 1.0f;
+        *out_count = 1;
+        return;
+    }
+
+    float max_val = -1e30f;
+    for (int c = 0; c < b->cand_count && n < 1200; c++) {
+        int q = b->cand_qi[c] - OFF;
+        int r = b->cand_ri[c] - OFF;
+        int i = q - offset_q, j = r - offset_r;
+        if (i >= 0 && i < MCTS_NN_SIZE && j >= 0 && j < MCTS_NN_SIZE) {
+            float val = logits_361[i * MCTS_NN_SIZE + j];
+            masked[n] = val;
+            mq[n] = (int16_t)q;
+            mr[n] = (int16_t)r;
+            if (val > max_val) max_val = val;
+            n++;
+        }
+    }
+
+    if (n == 0) { *out_count = 0; return; }
+
+    /* Softmax */
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        masked[i] = expf(masked[i] - max_val);
+        sum += masked[i];
+    }
+    if (sum < 1e-30f) {
+        float p = 1.0f / (float)n;
+        for (int i = 0; i < n; i++) masked[i] = p;
+    } else {
+        for (int i = 0; i < n; i++) masked[i] /= sum;
+    }
+
+    /* Sort descending by probability (insertion sort — fast for n < 1200) */
+    for (int i = 1; i < n; i++) {
+        float key_p = masked[i];
+        int16_t key_q = mq[i], key_r = mr[i];
+        int j = i - 1;
+        while (j >= 0 && masked[j] < key_p) {
+            masked[j + 1] = masked[j];
+            mq[j + 1] = mq[j];
+            mr[j + 1] = mr[j];
+            j--;
+        }
+        masked[j + 1] = key_p;
+        mq[j + 1] = key_q;
+        mr[j + 1] = key_r;
+    }
+
+    for (int i = 0; i < n; i++) {
+        out_move_q[i] = mq[i];
+        out_move_r[i] = mr[i];
+        out_prob[i] = masked[i];
+    }
+    *out_count = n;
+}
+
+/* --- EXPAND + BACKUP: process NN results --- */
+
+int mcts_expand_backup(MCTSTree *t, float *policy_batch, float *value_batch, int n_leaves) {
+    int16_t sorted_q[1200], sorted_r[1200];
+    float sorted_p[1200];
+
+    for (int leaf = 0; leaf < n_leaves; leaf++) {
+        int node_idx = t->leaf_node[leaf];
+        MCTSNodeC *node = &t->nodes[node_idx];
+        int depth = t->leaf_depth[leaf];
+
+        /* Undo virtual loss */
+        node->visit_count--;
+
+        /* Re-traverse to leaf to get board state */
+        memcpy(&t->board, &t->root_board, sizeof(Board));
+        int path_off = leaf * MCTS_MAX_DEPTH;
+        for (int d = 0; d < depth; d++) {
+            board_place(&t->board,
+                        t->leaf_path_q[path_off + d] + OFF,
+                        t->leaf_path_r[path_off + d] + OFF);
+        }
+
+        /* Decode policy */
+        float *logits = policy_batch + leaf * MCTS_NN_SIZE * MCTS_NN_SIZE;
+        int n_moves = 0;
+        mcts_decode_policy_internal(
+            logits, &t->board,
+            t->leaf_oq[leaf], t->leaf_or[leaf],
+            sorted_q, sorted_r, sorted_p, &n_moves);
+
+        if (n_moves == 0) {
+            /* No legal moves — shouldn't happen, just backup 0 */
+            mcts_backup(t, node_idx, 0.0f);
+            continue;
+        }
+
+        /* Create child nodes (top initial_width) */
+        int k = t->initial_width;
+        if (k > n_moves) k = n_moves;
+
+        node->children_start = t->child_pool_used;
+        /* Reserve space for potential widening (up to widen_100) */
+        int max_ch = t->widen_100;
+        if (max_ch > n_moves) max_ch = n_moves;
+
+        for (int i = 0; i < k; i++) {
+            int ci = mcts_alloc_node(t);
+            if (ci < 0) break;
+            MCTSNodeC *child = &t->nodes[ci];
+            child->parent = node_idx;
+            child->move_q = sorted_q[i];
+            child->move_r = sorted_r[i];
+            child->prior = sorted_p[i];
+            child->player = mcts_next_player(&t->board, node->player);
+
+            t->child_pool[t->child_pool_used++] = ci;
+        }
+        node->n_children = k;
+
+        /* Store remaining in pending pool */
+        int pending = n_moves - k;
+        if (pending > 0) {
+            node->pending_start = t->pend_pool_used;
+            int max_pend = max_ch - k;
+            if (pending > max_pend) pending = max_pend;
+            for (int i = k; i < k + pending; i++) {
+                t->pend_q[t->pend_pool_used] = sorted_q[i];
+                t->pend_r[t->pend_pool_used] = sorted_r[i];
+                t->pend_prior[t->pend_pool_used] = sorted_p[i];
+                t->pend_pool_used++;
+            }
+            node->n_pending = pending;
+        }
+
+        node->is_expanded = 1;
+
+        /* Value with quiescence adjustment */
+        float value = value_batch[leaf];
+        int cur_p = t->leaf_player[leaf];
+        int wm = board_count_winning_moves(&t->board, cur_p);
+        int opp_wm = board_count_winning_moves(&t->board, 1 - cur_p);
+        if (wm >= 3) {
+            value = (cur_p == t->root_player) ? 1.0f : -1.0f;
+        } else if (opp_wm >= 3) {
+            value = (cur_p == t->root_player) ? -1.0f : 1.0f;
+        } else if (wm >= 2) {
+            float boost = (cur_p == t->root_player) ? 0.15f : -0.15f;
+            value = value * 0.85f + boost;
+        } else if (opp_wm >= 2) {
+            float boost = (cur_p == t->root_player) ? -0.15f : 0.15f;
+            value = value * 0.85f + boost;
+        }
+
+        /* Convert value to root player perspective */
+        if (cur_p != t->root_player) value = -value;
+
+        mcts_backup(t, node_idx, value);
+    }
+
+    return 0;
+}
+
+/* --- Dirichlet noise at root --- */
+
+void mcts_apply_dirichlet(MCTSTree *t, float *noise, int n, float epsilon) {
+    MCTSNodeC *root = &t->nodes[0];
+    int count = root->n_children;
+    if (count > n) count = n;
+    for (int i = 0; i < count; i++) {
+        int ci = t->child_pool[root->children_start + i];
+        MCTSNodeC *child = &t->nodes[ci];
+        child->prior = (1.0f - epsilon) * child->prior + epsilon * noise[i];
+    }
+}
+
+/* --- Extract final policy --- */
+
+int mcts_get_policy(MCTSTree *t, float temperature,
+                    int16_t *out_q, int16_t *out_r, float *out_prob) {
+    MCTSNodeC *root = &t->nodes[0];
+    if (root->n_children == 0) return 0;
+
+    float total = 0.0f;
+    int n = root->n_children;
+    float probs[1200];
+
+    if (temperature < 1e-8f) {
+        /* Greedy: pick highest visit count */
+        int best_i = 0;
+        int best_v = 0;
+        for (int i = 0; i < n; i++) {
+            int ci = t->child_pool[root->children_start + i];
+            if (t->nodes[ci].visit_count > best_v) {
+                best_v = t->nodes[ci].visit_count;
+                best_i = i;
+            }
+        }
+        for (int i = 0; i < n; i++) probs[i] = 0.0f;
+        probs[best_i] = 1.0f;
+    } else {
+        float inv_temp = 1.0f / temperature;
+        for (int i = 0; i < n; i++) {
+            int ci = t->child_pool[root->children_start + i];
+            probs[i] = powf((float)t->nodes[ci].visit_count, inv_temp);
+            total += probs[i];
+        }
+        if (total > 1e-30f) {
+            for (int i = 0; i < n; i++) probs[i] /= total;
+        } else {
+            float p = 1.0f / (float)n;
+            for (int i = 0; i < n; i++) probs[i] = p;
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        int ci = t->child_pool[root->children_start + i];
+        out_q[i] = t->nodes[ci].move_q;
+        out_r[i] = t->nodes[ci].move_r;
+        out_prob[i] = probs[i];
+    }
+    return n;
+}
+
+/* --- Accessors for Python --- */
+int mcts_root_child_count(MCTSTree *t) { return t->nodes[0].n_children; }
+float *mcts_get_leaf_encodings(MCTSTree *t) { return t->leaf_enc; }
+int mcts_get_leaf_count(MCTSTree *t) { return t->leaf_count; }
+int mcts_get_node_count(MCTSTree *t) { return t->node_count; }
