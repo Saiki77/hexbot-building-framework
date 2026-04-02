@@ -331,8 +331,79 @@ def bench_search() -> Dict:
 # 4b. Threaded Self-play (CUDA benefits most, MPS has GIL issues)
 # ---------------------------------------------------------------------------
 
+def _gpu_selfplay_worker(result_path, n, use_c, device_str):
+    """Subprocess worker for threaded GPU self-play benchmark.
+    Top-level function so it's picklable on macOS (spawn method).
+    """
+    try:
+        import torch as _torch, json as _json
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import io, contextlib, time as _time
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            from orca.data import self_play_game_v2
+        from orca.network import create_network
+
+        _dev = _torch.device(device_str)
+        try:
+            from orca import Orca
+            bot = Orca.load(sims=1)
+            net = bot._net.to(_dev)
+            net.eval()
+            loaded = True
+        except Exception:
+            net = create_network('standard').to(_dev)
+            net.eval()
+            loaded = False
+
+        if use_c:
+            from orca.c_mcts import CMCTSSearch
+            mcts = CMCTSSearch(net, num_simulations=50, batch_size=64)
+        else:
+            from orca.search import BatchedMCTS
+            mcts = BatchedMCTS(net, num_simulations=50, batch_size=64)
+
+        times, lengths = [], []
+        def _play(i):
+            t0 = _time.perf_counter()
+            with contextlib.redirect_stdout(io.StringIO()):
+                samples, moves, *_ = self_play_game_v2(net, mcts)
+            return _time.perf_counter() - t0, len(moves)
+
+        wall_start = _time.perf_counter()
+        with ThreadPoolExecutor(max_workers=min(4, n)) as pool:
+            futs = [pool.submit(_play, i) for i in range(n)]
+            for f in as_completed(futs):
+                try:
+                    t, l = f.result(timeout=120)
+                    times.append(t)
+                    lengths.append(l)
+                except Exception:
+                    pass
+        wall_time = _time.perf_counter() - wall_start
+        ng = len(times)
+        total_moves = sum(lengths)
+        result = {
+            'games': ng, 'wall_time': wall_time,
+            'avg_time_per_game': sum(times) / max(ng, 1),
+            'games_per_hour': ng / wall_time * 3600 if wall_time > 0 else 0,
+            'throughput_factor': (ng / wall_time) / (1 / (sum(times) / max(ng, 1))) if times else 0,
+            'avg_game_length': sum(lengths) / max(ng, 1),
+            'positions_per_sec': total_moves / wall_time if wall_time > 0 else 0,
+            'checkpoint_loaded': loaded,
+        }
+        with open(result_path, 'w') as f:
+            _json.dump(result, f)
+    except Exception as e:
+        import json as _json
+        with open(result_path, 'w') as f:
+            _json.dump({'skipped': True, 'reason': str(e)}, f)
+
+
 def bench_gpu_selfplay(n_games=3) -> Dict:
-    """Threaded self-play with shared network. Uses C MCTS on all GPUs."""
+    """Threaded self-play with shared network. Uses C MCTS on all GPUs.
+    Runs in a subprocess so crashes (MPS segfaults) don't kill the benchmark.
+    """
     import torch
     from bot import get_device
 
@@ -340,7 +411,6 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
     if device.type not in ('cuda', 'mps'):
         return {'skipped': True, 'reason': f'GPU required (device={device})'}
 
-    # Use C MCTS (GIL-free) if available — enables MPS threaded
     use_c_mcts = False
     try:
         from orca.c_mcts import CMCTSSearch
@@ -349,54 +419,34 @@ def bench_gpu_selfplay(n_games=3) -> Dict:
         if device.type != 'cuda':
             return {'skipped': True, 'reason': f'C MCTS unavailable, MPS needs GIL-free tree ops'}
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import io, contextlib
+    import multiprocessing as mp
+    import tempfile
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        from orca.data import self_play_game_v2
+    result_file = tempfile.mktemp(suffix='.json')
+    p = mp.Process(target=_gpu_selfplay_worker,
+                   args=(result_file, n_games, use_c_mcts, str(device)))
+    p.start()
+    p.join(timeout=180)
 
-    net, loaded = _load_checkpoint_net(device)
-    if use_c_mcts:
-        mcts = CMCTSSearch(net, num_simulations=50, batch_size=64)
-    else:
-        from orca.search import BatchedMCTS
-        mcts = BatchedMCTS(net, num_simulations=50, batch_size=64)
+    if p.is_alive():
+        p.terminate()
+        p.join(timeout=5)
+        return {'skipped': True, 'reason': 'Timed out (180s)'}
 
-    # Measure wall-clock time for all games (parallel)
-    times = []
-    lengths = []
+    if p.exitcode != 0:
+        return {'skipped': True, 'reason': f'Subprocess crashed (exit code {p.exitcode})'}
 
-    def _play(i):
-        t0 = time.perf_counter()
-        with contextlib.redirect_stdout(io.StringIO()):
-            samples, moves, *_ = self_play_game_v2(net, mcts)
-        return time.perf_counter() - t0, len(moves)
-
-    wall_start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=min(4, n_games)) as pool:
-        futs = [pool.submit(_play, i) for i in range(n_games)]
-        for f in as_completed(futs):
-            try:
-                t, l = f.result()
-                times.append(t)
-                lengths.append(l)
-            except Exception as e:
-                print(f"  |  GPU worker error: {e}")
-                import traceback; traceback.print_exc()
-
-    wall_time = time.perf_counter() - wall_start
-    n = len(times)
-    total_moves = sum(lengths)
-    return {
-        'games': n,
-        'wall_time': wall_time,
-        'avg_time_per_game': sum(times) / max(n, 1),
-        'games_per_hour': n / wall_time * 3600 if wall_time > 0 else 0,
-        'throughput_factor': (n / wall_time) / (1 / (sum(times) / max(n, 1))) if times else 0,
-        'avg_game_length': sum(lengths) / max(n, 1),
-        'positions_per_sec': total_moves / wall_time if wall_time > 0 else 0,
-        'checkpoint_loaded': loaded,
-    }
+    try:
+        import json as _json
+        with open(result_file) as f:
+            return _json.load(f)
+    except Exception:
+        return {'skipped': True, 'reason': 'No results from subprocess'}
+    finally:
+        try:
+            os.unlink(result_file)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
