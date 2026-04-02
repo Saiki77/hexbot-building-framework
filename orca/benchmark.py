@@ -507,7 +507,6 @@ def bench_cpu_selfplay(n_games=3) -> Dict:
 def bench_selfplay(n_games=3) -> Dict:
     """Full self-play pipeline: game generation speed with actual checkpoint."""
     import torch
-    from orca.search import BatchedMCTS
     from bot import get_device
 
     import io, contextlib
@@ -516,7 +515,13 @@ def bench_selfplay(n_games=3) -> Dict:
 
     device = get_device()
     net, loaded = _load_checkpoint_net(device)
-    mcts = BatchedMCTS(net, num_simulations=50, batch_size=32)
+
+    try:
+        from orca.c_mcts import CMCTSSearch
+        mcts = CMCTSSearch(net, num_simulations=50, batch_size=50)
+    except Exception:
+        from orca.search import BatchedMCTS
+        mcts = BatchedMCTS(net, num_simulations=50, batch_size=32)
 
     times, lengths, sample_counts = [], [], []
     for _ in range(n_games):
@@ -548,7 +553,6 @@ def bench_selfplay(n_games=3) -> Dict:
 def bench_selfplay_scaling(n_games=3) -> Dict:
     """Self-play at multiple sim levels to show scaling behavior."""
     import torch
-    from orca.search import BatchedMCTS
     from orca.encoding import CGameState
     from bot import get_device
     import io, contextlib
@@ -560,8 +564,16 @@ def bench_selfplay_scaling(n_games=3) -> Dict:
     net, loaded = _load_checkpoint_net(device)
     results = {'checkpoint_loaded': loaded, 'levels': []}
 
+    # Use C MCTS if available
+    try:
+        from orca.c_mcts import CMCTSSearch
+        mcts_fn = lambda s: CMCTSSearch(net, num_simulations=s, batch_size=min(64, s))
+    except Exception:
+        from orca.search import BatchedMCTS
+        mcts_fn = lambda s: BatchedMCTS(net, num_simulations=s, batch_size=64)
+
     for sims in [50, 100, 200, 400]:
-        mcts = BatchedMCTS(net, num_simulations=sims, batch_size=64)
+        mcts = mcts_fn(sims)
         times, lengths = [], []
         for _ in range(n_games):
             t0 = time.perf_counter()
@@ -861,7 +873,7 @@ def print_report(results: Dict, device_info: Dict):
             ckpt = "checkpoint" if gsp.get('checkpoint_loaded') else "random weights"
             factor = gsp.get('throughput_factor', 0)
             pps = gsp.get('positions_per_sec', 0)
-            print(f"|  THREADED SELF-PLAY (50 sims, shared GPU, {ckpt})".ljust(W - 1) + "|")
+            print(f"|  THREADED SELF-PLAY (50 sims, C MCTS, shared GPU, {ckpt})".ljust(W - 1) + "|")
             print(f"|    {gsp['avg_time_per_game']:.1f}s/game  {gsp['avg_game_length']:.0f} moves  {gsp['games_per_hour']:.0f} games/hr  {pps:.1f} pos/s".ljust(W - 1) + "|")
             print(f"|    wall={gsp['wall_time']:.1f}s for {gsp['games']} games  parallelism={factor:.1f}x".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
