@@ -33,6 +33,74 @@ def _fmt(n):
     return f"{n:,.1f}"
 
 
+def _get_system_info() -> Dict:
+    """Collect detailed system info for reproducibility."""
+    import platform
+    import psutil
+    import torch
+
+    info = {
+        'platform': sys.platform,
+        'python': platform.python_version(),
+        'torch': torch.__version__,
+    }
+
+    # CPU
+    try:
+        if sys.platform == 'darwin':
+            import subprocess
+            chip = subprocess.check_output(
+                ['sysctl', '-n', 'machdep.cpu.brand_string'],
+                stderr=subprocess.DEVNULL).decode().strip()
+            info['cpu'] = chip
+        elif sys.platform == 'linux':
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if line.startswith('model name'):
+                        info['cpu'] = line.split(':')[1].strip()
+                        break
+        else:
+            info['cpu'] = platform.processor() or 'Unknown'
+    except Exception:
+        info['cpu'] = platform.processor() or 'Unknown'
+
+    info['cpu_cores'] = psutil.cpu_count(logical=False) or 0
+    info['cpu_threads'] = psutil.cpu_count(logical=True) or 0
+    info['ram_gb'] = round(psutil.virtual_memory().total / 1e9, 1)
+
+    # GPU
+    from bot import get_device
+    device = get_device()
+    info['device'] = str(device)
+    if device.type == 'cuda':
+        info['gpu'] = torch.cuda.get_device_name(0)
+        props = torch.cuda.get_device_properties(0)
+        vram = getattr(props, 'total_memory', getattr(props, 'total_mem', 0))
+        info['vram_gb'] = round(vram / 1e9, 1)
+    elif device.type == 'mps':
+        info['gpu'] = 'Apple MPS'
+        # Try to get Apple chip name
+        try:
+            import subprocess
+            chip = subprocess.check_output(
+                ['sysctl', '-n', 'machdep.cpu.brand_string'],
+                stderr=subprocess.DEVNULL).decode().strip()
+            info['gpu'] = f"Apple MPS ({chip.split('Apple ')[-1] if 'Apple' in chip else chip})"
+        except Exception:
+            pass
+    else:
+        info['gpu'] = 'CPU only'
+
+    # Hexbot version
+    try:
+        from importlib.metadata import version
+        info['hexbot_version'] = version('hexbot')
+    except Exception:
+        info['hexbot_version'] = 'dev'
+
+    return info
+
+
 def _load_checkpoint_net(device):
     """Load the actual Orca checkpoint for realistic benchmarks."""
     from orca.network import create_network
@@ -160,7 +228,7 @@ def bench_nn(configs=None) -> Dict:
         params = sum(p.numel() for p in net.parameters())
         results[f'{cfg}_params'] = params
 
-        for bs in [1, 8, 32, 64]:
+        for bs in [1, 8, 32, 64, 128]:
             dummy = torch.randn(bs, 7, 19, 19).to(device)
             # Warmup
             for _ in range(3):
@@ -415,6 +483,115 @@ def bench_selfplay(n_games=3) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# 5b. Self-play scaling (multiple sim counts)
+# ---------------------------------------------------------------------------
+
+def bench_selfplay_scaling(n_games=3) -> Dict:
+    """Self-play at multiple sim levels to show scaling behavior."""
+    import torch
+    from orca.search import BatchedMCTS
+    from orca.encoding import CGameState
+    from bot import get_device
+    import io, contextlib
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        from orca.data import self_play_game_v2
+
+    device = get_device()
+    net, loaded = _load_checkpoint_net(device)
+    results = {'checkpoint_loaded': loaded, 'levels': []}
+
+    for sims in [50, 100, 200, 400]:
+        mcts = BatchedMCTS(net, num_simulations=sims, batch_size=64)
+        times, lengths = [], []
+        for _ in range(n_games):
+            t0 = time.perf_counter()
+            with contextlib.redirect_stdout(io.StringIO()):
+                samples, moves, *_ = self_play_game_v2(net, mcts)
+            times.append(time.perf_counter() - t0)
+            lengths.append(len(moves))
+
+        total_t = sum(times)
+        total_m = sum(lengths)
+        results['levels'].append({
+            'sims': sims,
+            'games': n_games,
+            'total_time': total_t,
+            'avg_sec_per_game': total_t / n_games,
+            'games_per_hour': n_games / total_t * 3600,
+            'avg_moves': total_m / n_games,
+            'positions_per_sec': total_m / total_t if total_t > 0 else 0,
+            'ms_per_move': total_t / max(total_m, 1) * 1000,
+        })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 5c. C MCTS vs Python MCTS head-to-head
+# ---------------------------------------------------------------------------
+
+def bench_mcts_compare() -> Dict:
+    """Compare C MCTS and Python MCTS on identical positions."""
+    import torch
+    from orca.search import BatchedMCTS
+    from orca.encoding import CGameState
+    from bot import get_device
+
+    device = get_device()
+    net, loaded = _load_checkpoint_net(device)
+    results = {'checkpoint_loaded': loaded, 'comparisons': []}
+
+    # Try C MCTS
+    try:
+        from orca.c_mcts import CMCTSSearch
+        has_c = True
+    except Exception:
+        has_c = False
+        results['c_mcts_available'] = False
+        return results
+
+    results['c_mcts_available'] = True
+
+    for sims in [50, 200]:
+        py_mcts = BatchedMCTS(net, num_simulations=sims, batch_size=64)
+        c_mcts = CMCTSSearch(net, num_simulations=sims, batch_size=64)
+        N = 5
+
+        # Set up a mid-game position
+        def make_game():
+            g = CGameState()
+            g.place_stone(0, 0); g.place_stone(1, 0); g.place_stone(1, -1)
+            g.place_stone(-1, 1); g.place_stone(0, 2); g.place_stone(2, -1)
+            return g
+
+        py_times = []
+        for _ in range(N):
+            game = make_game()
+            t0 = time.perf_counter()
+            py_mcts.search(game, temperature=0.1, add_noise=False)
+            py_times.append(time.perf_counter() - t0)
+
+        c_times = []
+        for _ in range(N):
+            game = make_game()
+            t0 = time.perf_counter()
+            c_mcts.search(game, temperature=0.1, add_noise=False)
+            c_times.append(time.perf_counter() - t0)
+
+        py_avg = sum(py_times) / N
+        c_avg = sum(c_times) / N
+        results['comparisons'].append({
+            'sims': sims,
+            'python_ms': py_avg * 1000,
+            'c_mcts_ms': c_avg * 1000,
+            'speedup': py_avg / c_avg if c_avg > 0 else 0,
+        })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # 6. Training step benchmarks
 # ---------------------------------------------------------------------------
 
@@ -545,9 +722,20 @@ def print_report(results: Dict, device_info: Dict):
     print("|" + "  HEXBOT PLATFORM BENCHMARK".center(W - 2) + "|")
     print("+" + "=" * (W - 2) + "+")
 
-    import torch
     dev = device_info.get('device', '?')
-    print(f"|  Device: {dev}  |  PyTorch: {torch.__version__}  |  Platform: {sys.platform}".ljust(W - 1) + "|")
+    gpu = device_info.get('gpu', '')
+    cpu = device_info.get('cpu', '')
+    ram = device_info.get('ram_gb', 0)
+    vram = device_info.get('vram_gb', '')
+    torch_v = device_info.get('torch', '')
+    print(f"|  Device: {dev}  |  PyTorch: {torch_v}  |  Platform: {sys.platform}".ljust(W - 1) + "|")
+    if gpu:
+        gpu_line = f"|  GPU: {gpu}"
+        if vram:
+            gpu_line += f"  ({vram}GB VRAM)"
+        print(gpu_line.ljust(W - 1) + "|")
+    if cpu:
+        print(f"|  CPU: {cpu}  ({device_info.get('cpu_cores', '?')}C/{device_info.get('cpu_threads', '?')}T)  RAM: {ram}GB".ljust(W - 1) + "|")
     print("+" + "-" * (W - 2) + "+")
 
     # Engine
@@ -572,7 +760,10 @@ def print_report(results: Dict, device_info: Dict):
                 params = n.get(f'{cfg}_params', 0)
                 pps = n[key]
                 lat = n.get(f'{cfg}_bs64_latency_ms', 0)
-                print(f"|    {cfg:20s} {_fmt(params):>6} params  {_fmt(pps):>8} pos/s  {lat:>6.1f}ms".ljust(W - 1) + "|")
+                bs1 = n.get(f'{cfg}_bs1_pos_per_sec', 1)
+                bs128 = n.get(f'{cfg}_bs128_pos_per_sec', 0)
+                scale = f"{bs128/bs1:.0f}x" if bs1 > 0 and bs128 > 0 else ""
+                print(f"|    {cfg:16s} {_fmt(params):>6} params  {_fmt(pps):>8} pos/s  {lat:>5.1f}ms  {scale:>5}".ljust(W - 1) + "|")
         print("|" + "-" * (W - 2) + "|")
 
     # Latency
@@ -678,8 +869,103 @@ def print_report(results: Dict, device_info: Dict):
             marker = " <-- best" if gph == best_gph else ""
             print(f"|    {name:<20} {gph:>10.0f} {spg:>10.1f} {avg_len:>10.0f} {pps:>10.1f}{marker}".ljust(W - 1) + "|")
 
+    # Scaling test
+    if 'scaling' in results:
+        sc = results['scaling']
+        if sc.get('levels'):
+            print("|" + "-" * (W - 2) + "|")
+            print(f"|  SELF-PLAY SCALING (process-based)".ljust(W - 1) + "|")
+            print(f"|  {'Sims':>6} {'Games/hr':>10} {'Pos/sec':>10} {'ms/move':>10} {'Avg moves':>10}".ljust(W - 1) + "|")
+            for lv in sc['levels']:
+                print(f"|  {lv['sims']:>6} {lv['games_per_hour']:>10.0f} {lv['positions_per_sec']:>10.1f} {lv['ms_per_move']:>10.0f} {lv['avg_moves']:>10.0f}".ljust(W - 1) + "|")
+
+    # MCTS comparison
+    if 'mcts_compare' in results:
+        mc = results['mcts_compare']
+        if mc.get('comparisons'):
+            print("|" + "-" * (W - 2) + "|")
+            print(f"|  C MCTS vs PYTHON MCTS".ljust(W - 1) + "|")
+            print(f"|  {'Sims':>6} {'Python':>12} {'C MCTS':>12} {'Speedup':>10}".ljust(W - 1) + "|")
+            for c in mc['comparisons']:
+                print(f"|  {c['sims']:>6} {c['python_ms']:>10.1f}ms {c['c_mcts_ms']:>10.1f}ms {c['speedup']:>9.2f}x".ljust(W - 1) + "|")
+
     print("+" + "=" * (W - 2) + "+")
+
+    # Shareable markdown summary
+    _print_markdown_summary(results, device_info)
     print()
+
+
+def _print_markdown_summary(results: Dict, device_info: Dict):
+    """Print a copy-pasteable markdown block for sharing."""
+    dev = device_info.get('device', '?')
+    gpu = device_info.get('gpu', dev)
+    cpu = device_info.get('cpu', '?')
+    ram = device_info.get('ram_gb', 0)
+
+    # Collect key metrics
+    metrics = []
+    nn = results.get('nn', {})
+    nn_key = 'standard_bs64_pos_per_sec'
+    if nn_key in nn:
+        metrics.append(('NN inference (bs64)', f"{_fmt(nn[nn_key])} pos/s"))
+
+    search = results.get('search', {})
+    sk = 'mcts_sims50_bs64_searches_per_sec'
+    if sk in search:
+        metrics.append(('Search (50 sims)', f"{search[sk]:.1f} searches/s"))
+
+    sp = results.get('selfplay', {})
+    if sp and not sp.get('skipped'):
+        metrics.append(('Self-play (50 sims)', f"{sp['games_per_hour']:,.0f} games/hr"))
+        metrics.append(('Self-play pos/s', f"{sp.get('positions_per_sec', 0):.1f} pos/s"))
+
+    gsp = results.get('gpu_selfplay', {})
+    if gsp and not gsp.get('skipped'):
+        metrics.append(('Threaded GPU', f"{gsp['games_per_hour']:,.0f} games/hr"))
+
+    # Scaling
+    sc = results.get('scaling', {})
+    if sc.get('levels'):
+        for lv in sc['levels']:
+            if lv['sims'] in (200, 400):
+                metrics.append((f"Self-play ({lv['sims']} sims)", f"{lv['games_per_hour']:,.0f} games/hr"))
+
+    engine = results.get('engine', {})
+    if 'place_undo_per_sec' in engine:
+        metrics.append(('C engine ops', f"{_fmt(engine['place_undo_per_sec'])} place+undo/s"))
+
+    tr = results.get('training', {})
+    tk = 'train_bs1024_steps_per_sec'
+    if tk in tr:
+        metrics.append(('Training (bs1024)', f"{tr[tk]:.1f} steps/s"))
+
+    mc = results.get('mcts_compare', {})
+    if mc.get('comparisons'):
+        for c in mc['comparisons']:
+            if c['sims'] == 50:
+                metrics.append(('C MCTS speedup (50s)', f"{c['speedup']:.2f}x"))
+
+    # Score: games/hr at 50 sims (the universal comparison number)
+    score = int(sp.get('games_per_hour', 0)) if sp else 0
+
+    # Network info
+    net_params = nn.get('standard_params', 0)
+    net_name = 'standard'
+
+    print()
+    print("Copy-paste for Discord/GitHub:")
+    print("```")
+    print(f"## Hexbot Benchmark Results")
+    print(f"- **Platform**: {cpu}, {ram}GB RAM, {gpu}")
+    print(f"- **Network**: {net_name} ({net_params:,} params)")
+    print(f"- **Score**: {score:,} games/hr at 50 sims")
+    print()
+    print(f"| Metric | Value |")
+    print(f"|--------|-------|")
+    for name, val in metrics:
+        print(f"| {name} | {val} |")
+    print("```")
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +977,7 @@ def main():
         description="Hexbot platform benchmark - compare performance across hardware",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Sections: engine, nn, latency, search, selfplay, training, augmentation, replay, all
+Sections: engine, nn, latency, search, selfplay, gpu_selfplay, cpu_selfplay, scaling, mcts_compare, training, augmentation, replay, all
 
 Examples:
   python -m orca.benchmark                     # full benchmark
@@ -711,21 +997,11 @@ Examples:
     from bot import get_device
 
     device = get_device()
-    device_info = {
-        'device': str(device),
-        'torch_version': torch.__version__,
-        'platform': sys.platform,
-    }
-    if device.type == 'cuda':
-        device_info['gpu'] = torch.cuda.get_device_name(0)
-        props = torch.cuda.get_device_properties(0)
-        vram = getattr(props, 'total_memory', getattr(props, 'total_mem', 0))
-        device_info['vram_gb'] = round(vram / 1e9, 1)
-    elif device.type == 'mps':
-        device_info['gpu'] = 'Apple MPS'
+    device_info = _get_system_info()
 
     sections = args.section.lower().split(',') if args.section != 'all' else [
-        'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay', 'cpu_selfplay', 'training', 'augmentation', 'replay'
+        'engine', 'nn', 'latency', 'search', 'selfplay', 'gpu_selfplay', 'cpu_selfplay',
+        'scaling', 'mcts_compare', 'training', 'augmentation', 'replay',
     ]
 
     results = {}
@@ -754,6 +1030,11 @@ Examples:
             elif section == 'cpu_selfplay':
                 n = 3 if args.quick else 5
                 results['cpu_selfplay'] = bench_cpu_selfplay(n)
+            elif section == 'scaling':
+                n = 2 if args.quick else 3
+                results['scaling'] = bench_selfplay_scaling(n)
+            elif section == 'mcts_compare':
+                results['mcts_compare'] = bench_mcts_compare()
             elif section == 'training':
                 n = 5 if args.quick else 20
                 results['training'] = bench_training(n)
