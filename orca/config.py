@@ -45,10 +45,10 @@ REPLAY_BUFFER_SIZE = 400_000  # experience replay capacity
 # ---------------------------------------------------------------------------
 DEFAULT_TRAIN_STEPS = 200     # gradient steps per iteration
 DEFAULT_GAMES_PER_ITER = 100  # base games (curriculum may adjust)
-CHECKPOINT_EVERY = 5          # save checkpoint every N iterations
+CHECKPOINT_EVERY = 1          # save checkpoint every N iterations
 MAX_WORKERS = 5               # parallel self-play workers
 GAMES_PER_FUTURE = 2          # games per subprocess future
-ELO_EVAL_EVERY = 2            # ELO evaluation frequency (iterations)
+ELO_EVAL_EVERY = 1            # ELO evaluation frequency (iterations)
 ELO_EVAL_GAMES = 4            # games per ELO opponent
 ELO_EVAL_SIMS = 30            # MCTS sims during ELO games (lower = faster eval)
 ELO_MAX_OPPONENTS = 6         # max past versions to play against

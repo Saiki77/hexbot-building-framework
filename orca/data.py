@@ -925,10 +925,15 @@ def self_play_game_v2(
             break
 
         # --- DISTANT EXPLORATION: inject gap candidates into policy ---
-        if PLAY_STYLE == 'distant' and move_count < 15:
+        # Read play style dynamically so dashboard changes take effect
+        try:
+            from orca.config import PLAY_STYLE as _ps, DISTANT_RANGE as _dr, DISTANT_EXPLORE_PROB as _dep
+        except ImportError:
+            _ps, _dr, _dep = PLAY_STYLE, DISTANT_RANGE, DISTANT_EXPLORE_PROB
+        if _ps == 'distant' and move_count < 15:
             existing = _get_existing_stones(game)
             if existing and len(policy) > 0:
-                lo, hi = DISTANT_RANGE
+                lo, hi = _dr
                 gap_candidates = []
                 for sq, sr in existing:
                     for dq in range(-hi, hi + 1):
@@ -1083,7 +1088,11 @@ def self_play_game_v2(
             sample.priority *= 1.2
 
     # --- DIVERSITY BONUS ---
-    if PLAY_STYLE == 'distant' and game.total_stones > 10:
+    try:
+        from orca.config import PLAY_STYLE as _play_style
+    except ImportError:
+        _play_style = PLAY_STYLE
+    if _play_style == 'distant' and game.total_stones > 10:
         all_stones = list(_get_existing_stones(game))
         if all_stones:
             qs = [s[0] for s in all_stones]

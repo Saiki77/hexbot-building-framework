@@ -817,14 +817,18 @@ class BatchedMCTS:
                         c_priors = {}
                         for i in range(n_scored):
                             c_priors[(q_arr[i], r_arr[i])] = exp_scores[i] / total
-                        # Blend NN + C heuristic
-                        if PLAY_STYLE == 'distant':
+                        # Blend NN + C heuristic (read config dynamically)
+                        try:
+                            from orca.config import PLAY_STYLE as _ps, C_BLEND_ADJACENT as _cba, C_BLEND_DISTANT as _cbd
+                        except ImportError:
+                            _ps, _cba, _cbd = PLAY_STYLE, C_BLEND_ADJACENT, C_BLEND_DISTANT
+                        if _ps == 'distant':
                             existing = _get_existing_stones(game)
                             for move in policy:
                                 c_prob = c_priors.get(move, 0.01)
                                 adj = any(abs(move[0]-s[0]) + abs(move[1]-s[1]) <= 1
                                           for s in existing) if existing else True
-                                blend = C_BLEND_ADJACENT if adj else C_BLEND_DISTANT
+                                blend = _cba if adj else _cbd
                                 policy[move] = (1 - blend) * policy[move] + blend * c_prob
                         else:
                             for move in policy:
