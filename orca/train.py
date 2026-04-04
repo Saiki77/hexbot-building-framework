@@ -154,21 +154,45 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
 
     import time as _time, os as _os
 
+    import torch as _torch
+
     t_load = _time.perf_counter()
     net = create_network(net_config)
     migrated = migrate_checkpoint_5to7(dict(net_state_dict))
     migrated = migrate_checkpoint_filters(migrated)
     net.load_state_dict(migrated, strict=False)
     net.eval()
+
+    # Try to use MPS in subprocess (much faster than CPU)
+    _dev = 'cpu'
+    try:
+        if _torch.backends.mps.is_available():
+            net = net.to('mps')
+            _dev = 'mps'
+    except Exception:
+        pass
+    try:
+        if _torch.cuda.is_available():
+            net = net.to('cuda')
+            _dev = 'cuda'
+    except Exception:
+        pass
+
     t_load = _time.perf_counter() - t_load
 
+    # Use C MCTS if available (2x faster tree ops)
     if use_alphabeta:
         searcher = BatchedNNAlphaBeta(net, depth=ab_depth, nn_depth=5)
     else:
-        searcher = BatchedMCTS(net, num_simulations=num_sims, batch_size=32)
+        try:
+            from orca.c_mcts import CMCTSSearch
+            searcher = CMCTSSearch(net, num_simulations=num_sims,
+                                   batch_size=min(64, num_sims))
+        except Exception:
+            searcher = BatchedMCTS(net, num_simulations=num_sims, batch_size=32)
 
     pid = _os.getpid()
-    _builtin_print(f"  |  [Worker {pid}] loaded in {t_load:.1f}s, "
+    _builtin_print(f"  |  [Worker {pid}] loaded in {t_load:.1f}s on {_dev}, "
                    f"playing {games} games ({num_sims} sims)")
 
     results = []
