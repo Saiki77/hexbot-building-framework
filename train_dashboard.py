@@ -875,6 +875,31 @@ def api_gamelength():
     return jsonify(data)
 
 
+@app.route('/api/vs_ramora', methods=['POST'])
+def api_vs_ramora():
+    """Play a quick match vs Ramora and return result."""
+    if not training_mgr or not training_mgr.net:
+        return jsonify({'error': 'No model loaded'}), 400
+    try:
+        from opponents.ramora.adapter import play_match, create_ramora_bot
+        from orca.c_mcts import CMCTSSearch
+        net = training_mgr.net
+        net.eval()
+        mcts = CMCTSSearch(net, num_simulations=50, batch_size=50)
+        ramora = create_ramora_bot(time_limit=1.0)
+        # Play 2 games (1 as first, 1 as second)
+        wins = losses = draws = 0
+        for i in range(2):
+            r = play_match(mcts, net, ramora, orca_plays_first=(i == 0))
+            if r['winner'] == 'orca': wins += 1
+            elif r['winner'] == 'ramora': losses += 1
+            else: draws += 1
+        return jsonify({'wins': wins, 'losses': losses, 'draws': draws,
+                       'label': f'{wins}W/{losses}L/{draws}D'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/train/start', methods=['POST'])
 def train_start():
     data = request.json or {}
@@ -1598,6 +1623,8 @@ body.dark #value-chart-wrap{border-color:#333}
   <span class="sep">|</span>
   <span>Win P0:<b id="s-w0">0</b>% P1:<b id="s-w1">0</b>%</span>
   <span class="sep">|</span>
+  <span>vs Ramora: <b id="s-ramora">--</b></span>
+  <span class="sep">|</span>
   <span class="res-bar">CPU <div class="res-meter"><div class="res-meter-fill" id="cpu-fill" style="width:0%"></div></div> <b id="s-cpu">0</b>%</span>
   <span class="res-bar">RAM <div class="res-meter"><div class="res-meter-fill" id="ram-fill" style="width:0%"></div></div> <b id="s-ram">0</b>%</span>
 </footer>
@@ -1617,11 +1644,20 @@ socket.on('iteration_complete', d => {
     if (d.workers != null && el('ls-workers')) el('ls-workers').textContent = d.workers;
     if (el('progress-wrap')) el('progress-wrap').style.display = 'none';
     fetchCharts();
+    if (d.iteration && d.iteration % 5 === 0) fetchRamora();
   } catch(e) { console.error('iteration_complete error:', e); }
 });
 socket.on('training_complete', () => {
   el('status').textContent = 'COMPLETE';
 });
+
+function fetchRamora() {
+  el('s-ramora').textContent = '...';
+  fetch('/api/vs_ramora', { method: 'POST' }).then(r => r.json()).then(d => {
+    if (d.label) el('s-ramora').textContent = d.label;
+    else if (d.error) el('s-ramora').textContent = 'err';
+  }).catch(() => { el('s-ramora').textContent = 'err'; });
+}
 
 // --- Start / Stop training ---
 function startTraining() {
