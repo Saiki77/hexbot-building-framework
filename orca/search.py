@@ -774,30 +774,10 @@ class BatchedMCTS:
         """
         root = MCTSNode(parent=None, move=None, prior=0.0, player=game.current_player)
 
-        # --- AB HYBRID: configurable depth search to detect forced wins ---
-        try:
-            from orca.config import USE_AB_HYBRID, AB_HYBRID_DEPTH
-        except ImportError:
-            USE_AB_HYBRID, AB_HYBRID_DEPTH = True, 4
-        try:
-            if USE_AB_HYBRID and AB_HYBRID_DEPTH > 0 and hasattr(game, '_lib'):
-                ab_val = ctypes.c_float(0)
-                ab_ste = ctypes.c_int(0)
-                game._lib.c_ab_solve(game._ptr, AB_HYBRID_DEPTH,
-                                      ctypes.byref(ab_val), ctypes.byref(ab_ste))
-                if abs(ab_val.value) >= 1.0:
-                    # Proven win/loss - skip MCTS entirely
-                    moves = game.legal_moves()
-                    if moves:
-                        # Return best move from scored moves
-                        q_arr = (ctypes.c_int * 10)()
-                        r_arr = (ctypes.c_int * 10)()
-                        s_arr = (ctypes.c_int * 10)()
-                        n = game._lib.board_get_scored_moves(game._ptr, q_arr, r_arr, s_arr, 1)
-                        if n > 0:
-                            return {(q_arr[0], r_arr[0]): 1.0}
-        except Exception:
-            pass
+        # AB hybrid disabled during training — MCTS must learn to find wins itself.
+        # The AB pre-check was auto-finishing games, preventing the network from
+        # learning winning/blocking patterns. Only enable for inference (play.py).
+        pass
 
         # Use C-engine encoding if CGameState, else Python
         if isinstance(game, CGameState):

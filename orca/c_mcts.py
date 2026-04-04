@@ -118,23 +118,8 @@ class CMCTSSearch:
         """Run C MCTS. Returns {(q, r): probability}."""
         lib = self.lib
 
-        # AB hybrid pre-check: detect forced wins in shallow search
-        try:
-            from orca.config import USE_AB_HYBRID, AB_HYBRID_DEPTH
-            if USE_AB_HYBRID and AB_HYBRID_DEPTH > 0 and hasattr(game, '_lib'):
-                ab_val = ctypes.c_float(0)
-                ab_ste = ctypes.c_int(0)
-                game._lib.c_ab_solve(game._ptr, AB_HYBRID_DEPTH,
-                                     ctypes.byref(ab_val), ctypes.byref(ab_ste))
-                if abs(ab_val.value) >= 1.0:
-                    q_arr = (ctypes.c_int * 10)()
-                    r_arr = (ctypes.c_int * 10)()
-                    s_arr = (ctypes.c_int * 10)()
-                    n = game._lib.board_get_scored_moves(game._ptr, q_arr, r_arr, s_arr, 1)
-                    if n > 0:
-                        return {(q_arr[0], r_arr[0]): 1.0}
-        except Exception:
-            pass
+        # AB hybrid disabled during training — MCTS must learn to find wins itself.
+        pass
 
         # Create C tree — cap batch_size to sim count (no point sending
         # 64 positions when we only need 50 sims total)
