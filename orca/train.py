@@ -1078,12 +1078,14 @@ class OrcaTrainer:
                           f"{stall}")
 
             # -- Launch background ELO evaluation ------------------------------
+            # Always add to vault (even if eval is running)
+            self.model_vault.add(iteration + 1, self.net.state_dict())
+
             elo_thread = getattr(self, '_elo_thread', None)
             elo_running = elo_thread is not None and elo_thread.is_alive()
             if (len(replay_buffer) >= BATCH_SIZE
                     and (iteration + 1) % self.elo_every == 0
                     and not elo_running):
-                self.model_vault.add(iteration + 1, self.net.state_dict())
                 n_opp = min(self.arena.max_opponents,
                             len(self.model_vault) - 1)
                 n_eval_games = n_opp * self.arena.games_per_opponent
