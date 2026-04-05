@@ -434,9 +434,10 @@ class GenerationalArena:
 
     def _play_vs_baseline(self, mcts_cur, baseline_type: str):
         """Play against a baseline bot. Returns (wins, losses)."""
+        from orca.encoding import CGameState
         wins = losses = 0
         for g in range(self.baseline_games):
-            game = HexGame(candidate_radius=2, max_total_stones=200)
+            game = CGameState(max_total_stones=200)
             cur_is_p0 = (g % 2 == 0)
             while not game.is_terminal:
                 if (game.current_player == 0) == cur_is_p0:
@@ -464,9 +465,9 @@ class GenerationalArena:
                             candidates = game.legal_moves()
                             best = candidates[0] if candidates else (0, 0)
                 game.place_stone(*best)
-            result = game.result()
+            result = game.result_for(0)  # from P0 perspective
             if not cur_is_p0:
-                result = -result
+                result = -result  # flip if current model was P1
             if result > 0: wins += 1
             elif result < 0: losses += 1
         return wins, losses
@@ -501,7 +502,8 @@ class GenerationalArena:
         return sorted(selected)
 
     def _play(self, mcts_p0: MCTS, mcts_p1: MCTS) -> float:
-        game = HexGame(candidate_radius=2, max_total_stones=200)
+        from orca.encoding import CGameState
+        game = CGameState(max_total_stones=200)
         while not game.is_terminal:
             mcts = mcts_p0 if game.current_player == 0 else mcts_p1
             policy = mcts.search(game, temperature=0.1, add_noise=False)
@@ -509,7 +511,7 @@ class GenerationalArena:
                 break
             best = max(policy, key=policy.get)
             game.place_stone(*best)
-        return game.result()
+        return game.result_for(0)  # +1 if P0 won, -1 if P1 won, 0 draw
 
 
 # ---------------------------------------------------------------------------
