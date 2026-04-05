@@ -1236,8 +1236,12 @@ class OrcaTrainer:
         from orca.search import BatchedMCTS
 
         self.net.eval()
-        mcts = BatchedMCTS(self.net, num_simulations=current_sims, batch_size=64)
+        # Use fewer sims for SealBot games (Orca loses anyway, learning from the loss)
+        seal_sims = min(current_sims, 50)
+        mcts = BatchedMCTS(self.net, num_simulations=seal_sims, batch_size=64)
         ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
+        print(f"  |  SealBot games: {n_games} games, {seal_sims} sims, "
+              f"{RAMORA_TIME_LIMIT}s/move for SealBot")
 
         wins = losses = draws = 0
         total_samp = 0
