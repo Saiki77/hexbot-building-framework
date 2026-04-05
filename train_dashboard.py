@@ -928,6 +928,19 @@ def play_move():
         return jsonify({'error': 'No active game'}), 400
 
     game = session['game']
+
+    # Validate: check if cell is occupied
+    occupied = set()
+    for _, mq, mr in session['moves']:
+        occupied.add((mq, mr))
+    if (q, r) in occupied:
+        return jsonify({'error': 'Cell already occupied', 'moves': []}), 400
+
+    # Check it's human's turn
+    current = game._lib.board_get_current_player(game._ptr)
+    if current != session['human_player']:
+        return jsonify({'error': 'Not your turn', 'moves': []}), 400
+
     game.place_stone(q, r)
     session['moves'].append(('human', q, r))
 
@@ -941,15 +954,13 @@ def play_move():
         result['winner'] = session['winner']
         return jsonify(result)
 
-    # Check if human has more stones this turn (connect-6 double move)
-    stt = game._lib.board_get_stones_this_turn(game._ptr)
-    spt = game._lib.board_get_stones_per_turn(game._ptr)
-    if stt < spt:
-        # Human places second stone
+    # Check if it's still human's turn (connect-6: may need second stone)
+    current_after = game._lib.board_get_current_player(game._ptr)
+    if current_after == session['human_player']:
         result['need_second'] = True
         return jsonify(result)
 
-    # Bot's turn
+    # Bot's turn — bot plays until it's human's turn again
     bot_moves = _play_bot_move(session)
     result['moves'].extend(bot_moves)
     if session['game_over']:
@@ -978,38 +989,44 @@ def _play_bot_move(session):
     """Have the bot make its move(s). Returns list of {who, q, r} dicts."""
     game = session['game']
     opponent = session['opponent']
+    bot_player = 1 - session['human_player']
     bot_moves = []
 
     if opponent == 'sealbot':
         try:
             from opponents.ramora.adapter import create_ramora_bot
-            from opponents.ramora.game import HexGame as RamoraGame, Player as RamoraPlayer
+            from opponents.ramora.game import HexGame as RamoraGame
             sealbot = create_ramora_bot(time_limit=1.0)
             # Rebuild Ramora game state from moves
             rgame = RamoraGame()
             for who, q, r in session['moves']:
                 rgame.make_move(q, r)
             result = sealbot.get_move(rgame)
-            for m in result:
-                q, r = m[0], m[1]
-                game.place_stone(q, r)
-                session['moves'].append(('bot', q, r))
-                bot_moves.append({'who': 'bot', 'q': q, 'r': r})
-                if game.is_terminal:
-                    break
+            if result:
+                for m in result:
+                    if game.is_terminal:
+                        break
+                    q, r = m[0], m[1]
+                    game.place_stone(q, r)
+                    session['moves'].append(('bot', q, r))
+                    bot_moves.append({'who': 'bot', 'q': q, 'r': r})
         except Exception as e:
             print(f"  |  SealBot play error: {e}")
+            import traceback; traceback.print_exc()
     else:
-        # Orca MCTS
+        # Orca MCTS — play stones until it's human's turn again
         if training_mgr and training_mgr.net:
             from orca.search import BatchedMCTS
             net = training_mgr.net
             net.eval()
             mcts = BatchedMCTS(net, num_simulations=200, batch_size=64)
-            spt = game._lib.board_get_stones_per_turn(game._ptr)
-            for _ in range(spt):
+            # Play until current_player switches to human
+            for _ in range(3):  # max 2 stones + safety
                 if game.is_terminal:
                     break
+                current = game._lib.board_get_current_player(game._ptr)
+                if current != bot_player:
+                    break  # it's human's turn now
                 policy = mcts.search(game, temperature=0.1, add_noise=False)
                 if not policy:
                     break
@@ -1017,6 +1034,8 @@ def _play_bot_move(session):
                 game.place_stone(best[0], best[1])
                 session['moves'].append(('bot', best[0], best[1]))
                 bot_moves.append({'who': 'bot', 'q': best[0], 'r': best[1]})
+        else:
+            print("  |  Orca play error: no model loaded (start training first)")
 
     if game.is_terminal:
         session['game_over'] = True
@@ -2859,8 +2878,11 @@ function onPlayCanvasClick(e) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({session_id: playSession.id, q: q_ax, r: r_ax})
   }).then(r => r.json()).then(d => {
-    if (d.error) { el('play-info').textContent = d.error; return; }
-    for (const m of d.moves) playApplyMove(m.who, m.q, m.r);
+    if (d.error) {
+      el('play-info').textContent = d.error + ' - try another cell';
+      return;
+    }
+    for (const m of (d.moves || [])) playApplyMove(m.who, m.q, m.r);
     drawPlayBoard();
     // Update move log
     const ml = el('play-moves');
