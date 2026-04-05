@@ -158,7 +158,9 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
 
     t_load = _time.perf_counter()
     net = create_network(net_config)
-    migrated = migrate_checkpoint_5to7(dict(net_state_dict))
+    # Strip _orig_mod. prefix from torch.compile() state dicts
+    raw = {k.replace('_orig_mod.', ''): v for k, v in dict(net_state_dict).items()}
+    migrated = migrate_checkpoint_5to7(raw)
     migrated = migrate_checkpoint_filters(migrated)
     net.load_state_dict(migrated, strict=False)
     net.eval()
@@ -984,19 +986,26 @@ class OrcaTrainer:
         try:
             ckpt = torch.load(resume_path, map_location=self.device,
                               weights_only=False)
-            old_shape = ckpt["model_state_dict"].get("conv_init.weight", None)
-            migrated_sd = migrate_checkpoint_5to7(ckpt["model_state_dict"])
+            raw_sd = ckpt["model_state_dict"]
+            # Strip _orig_mod. prefix from torch.compile() checkpoints
+            raw_sd = {k.replace('_orig_mod.', ''): v for k, v in raw_sd.items()}
+            migrated_sd = migrate_checkpoint_5to7(raw_sd)
             migrated_sd = migrate_checkpoint_filters(migrated_sd)
+            old_shape = raw_sd.get("conv_init.weight", None)
             new_shape = migrated_sd.get("conv_init.weight", None)
             arch_changed = (old_shape is not None and new_shape is not None
                             and old_shape.shape != new_shape.shape)
-            ckpt["model_state_dict"] = migrated_sd
             self.net.load_state_dict(migrated_sd, strict=False)
 
             if arch_changed:
                 print(f"    Fresh optimizer (architecture migrated)")
+            elif "optimizer_state_dict" in ckpt:
+                try:
+                    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"    WARN: Could not restore optimizer: {e}")
             else:
-                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                print(f"    Fresh optimizer (no optimizer in checkpoint)")
 
             start_iteration = ckpt.get("iteration", 0) + 1
 
@@ -1264,7 +1273,9 @@ class OrcaTrainer:
                 # Fall through to process-based path
 
         if use_v2:
-            net_state = {k: v.cpu() for k, v in self.net.state_dict().items()}
+            # Strip _orig_mod. prefix from torch.compile() before sending to workers
+            net_state = {k.replace('_orig_mod.', ''): v.cpu()
+                         for k, v in self.net.state_dict().items()}
             print(f"  |  Self-play: V2 (C engine + MCTS {current_sims} sims)...")
 
             GAMES_PER_FUTURE = 2
