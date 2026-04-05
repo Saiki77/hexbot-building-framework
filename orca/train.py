@@ -1258,6 +1258,9 @@ class OrcaTrainer:
                 at = ckpt["auto_tuner"]
                 auto_tuner.params = at.get("params", auto_tuner.params)
                 auto_tuner.params["lr"] = optimizer.param_groups[0]["lr"]
+                # Clamp train_steps to current cap
+                if auto_tuner.params.get("train_steps", 200) > 300:
+                    auto_tuner.params["train_steps"] = 300
                 # Keep the tactical mix — don't reset to 100% normal
                 auto_tuner.params.setdefault("mix_normal", 0.60)
                 auto_tuner.params.setdefault("mix_endgame", 0.15)
