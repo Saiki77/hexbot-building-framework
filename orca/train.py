@@ -116,50 +116,11 @@ _curriculum_stall_iters: int = 0
 
 
 def get_curriculum_sims(iteration: int, configured_sims: int = 0) -> int:
-    """Adaptive sim curriculum: start low, scale up toward configured target.
-
-    Scales from 25% -> 50% -> 75% -> 100% of the configured sims target
-    (from orca.config.NUM_SIMULATIONS) over time and iterations.
-    Also boosts sims when ELO stalls (plateau detection).
-
-    Args:
-        iteration: current training iteration
-        configured_sims: the user's configured NUM_SIMULATIONS (0 = read from config)
-    """
-    global _curriculum_start_time
-    if _curriculum_start_time is None:
-        _curriculum_start_time = time.perf_counter()
-
+    """Return configured sims directly (no curriculum scaling)."""
     if configured_sims <= 0:
         from orca.config import NUM_SIMULATIONS
         configured_sims = NUM_SIMULATIONS
-
-    hours_elapsed = (time.perf_counter() - _curriculum_start_time) / 3600
-
-    # Scale as fraction of configured target
-    if hours_elapsed < 0.5:
-        frac_time = 0.25
-    elif hours_elapsed < 1.5:
-        frac_time = 0.50
-    elif hours_elapsed < 3.0:
-        frac_time = 0.75
-    else:
-        frac_time = 1.0
-
-    if iteration < 10:
-        frac_iter = 0.25
-    elif iteration < 30:
-        frac_iter = 0.50
-    elif iteration < 60:
-        frac_iter = 0.75
-    else:
-        frac_iter = 1.0
-
-    sims = int(configured_sims * max(frac_time, frac_iter))
-    sims = max(sims, 30)  # absolute minimum
-    if _curriculum_stall_iters >= 10:
-        sims = min(configured_sims * 2, sims + 50)
-    return sims
+    return configured_sims
 
 
 def update_curriculum_plateau(current_elo: float) -> None:
@@ -780,7 +741,7 @@ class OrcaTrainer:
         print(f"  Network:     {self.net_config} ({param_count:,} params)")
         print(f"  Device:      {self.device}")
         print(f"  Iterations:  {self.num_iterations}")
-        print(f"  Games/iter:  {self.games_per_iter} (base, scaled by curriculum)")
+        print(f"  Games/iter:  {self.games_per_iter}")
         print(f"  Train steps: {self.train_steps}/iter")
 
         # Detect C engine

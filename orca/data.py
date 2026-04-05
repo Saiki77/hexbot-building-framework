@@ -924,8 +924,10 @@ def self_play_game_v2(
         if not policy:
             break
 
-        # --- DISTANT EXPLORATION: inject gap candidates into policy ---
-        if PLAY_STYLE == 'distant' and move_count < 15:
+        # --- DISTANT EXPLORATION: inject ONE gap candidate with small prob ---
+        # Subtle: only 1 stone, only 2% probability, only in first 10 moves
+        # This prevents throwing games by placing 3 random stones far away
+        if PLAY_STYLE == 'distant' and move_count < 10 and random.random() < 0.3:
             existing = _get_existing_stones(game)
             if existing and len(policy) > 0:
                 lo, hi = DISTANT_RANGE
@@ -940,12 +942,8 @@ def self_play_game_v2(
                             if (cq, cr) not in existing and (cq, cr) not in policy:
                                 gap_candidates.append((cq, cr))
                 if gap_candidates:
-                    n_inject = min(3, len(gap_candidates))
-                    injected = random.sample(gap_candidates, n_inject)
-                    inject_each = 0.05 / n_inject
-                    for m in injected:
-                        policy[m] = inject_each
-                    # Renormalize so probabilities sum to exactly 1.0
+                    injected = random.choice(gap_candidates)
+                    policy[injected] = 0.02  # small probability, won't dominate
                     total = sum(policy.values())
                     if total > 0:
                         policy = {m: p / total for m, p in policy.items()}

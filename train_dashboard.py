@@ -2575,8 +2575,6 @@ if __name__ == '__main__':
     print(f'Device: {get_device()}')
     print(f'CPU cores: {multiprocessing.cpu_count()}')
     print(f'Workers: {resource_monitor.num_threads}')
-    print(f'Curriculum: 20->50->100->200 sims, games scale down as sims increase')
-    print(f'LR: 0.01 -> decay 0.5 every 20 iters')
     print(f'Open http://localhost:{port}')
     # Suppress Flask/Werkzeug HTTP request spam
     import logging

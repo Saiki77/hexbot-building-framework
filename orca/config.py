@@ -20,7 +20,7 @@ C_PUCT = 1.5           # exploration constant
 NUM_SIMULATIONS = 400  # MCTS sims per move (curriculum may override)
 MCTS_BATCH_SIZE = 64   # positions per batched NN forward pass
 DIRICHLET_ALPHA = 0.3  # root noise (0.3 = diverse exploration)
-DIRICHLET_EPSILON = 0.25
+DIRICHLET_EPSILON = 0.15 # fraction of prior replaced by noise (0.15 = subtle, 0.25 = aggressive)
 TEMP_THRESHOLD = 20    # moves before switching to greedy play
 
 # ---------------------------------------------------------------------------
