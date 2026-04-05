@@ -847,41 +847,24 @@ class OrcaTrainer:
             self.net.to(self.device)
             print(f"  |  ONNX export: {time.perf_counter() - t_exp:.1f}s")
 
-            # -- Play games vs SealBot (first) --------------------------------
+            # Split games: SealBot (90%) + self-play (10%)
             collected_samples = []
             total_samples = 0
-            t_ramora_start = time.perf_counter()
-            try:
-                from orca.config import RAMORA_GAME_FRACTION, RAMORA_TIME_LIMIT
-                n_ramora = max(1, int(current_games * RAMORA_GAME_FRACTION))
-                ramora_results = self._play_vs_ramora_batch(
-                    n_ramora, current_sims, replay_buffer, collected_samples)
-                total_samples += ramora_results.get('samples', 0)
-                r_w, r_l = ramora_results.get('wins', 0), ramora_results.get('losses', 0)
-                self.metrics.setdefault('ramora_wins', 0)
-                self.metrics.setdefault('ramora_losses', 0)
-                self.metrics.setdefault('ramora_draws', 0)
-                self.metrics['ramora_wins'] += r_w
-                self.metrics['ramora_losses'] += r_l
-                self.metrics['ramora_draws'] += ramora_results.get('draws', 0)
-            except Exception as e:
-                print(f"  |  Ramora games skipped: {e}")
-                import traceback; traceback.print_exc()
-            self._last_ramora_time = time.perf_counter() - t_ramora_start
-
-            # Self-play gets the remaining games (total - ramora)
             try:
                 from orca.config import RAMORA_GAME_FRACTION
-                selfplay_games = max(5, current_games - int(current_games * RAMORA_GAME_FRACTION))
+                n_ramora = max(1, int(current_games * RAMORA_GAME_FRACTION))
+                selfplay_games = max(5, current_games - n_ramora)
             except ImportError:
+                n_ramora = 0
                 selfplay_games = current_games
 
-            # Build position mix
+            # -- Launch self-play FIRST (runs in background workers) ----------
             all_positions = self._build_position_mix(
                 selfplay_games, auto_tuner.params)
 
-            # -- Self-play ---------------------------------------------------
             t_sp = time.perf_counter()
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            # Start self-play workers (non-blocking — they run while SealBot plays)
             sp_result = self._run_self_play(
                 use_v2, current_sims, selfplay_games, all_positions,
                 onnx_path, replay_buffer)
@@ -892,6 +875,26 @@ class OrcaTrainer:
             total_moves = sp_result["total_moves"]
             wins = sp_result["wins"]
             collected_samples.extend(sp_result["collected_samples"])
+
+            # -- Play SealBot games (sequential, uses main thread GPU) --------
+            t_ramora_start = time.perf_counter()
+            if n_ramora > 0:
+                try:
+                    from orca.config import RAMORA_TIME_LIMIT
+                    ramora_results = self._play_vs_ramora_batch(
+                        n_ramora, current_sims, replay_buffer, collected_samples)
+                    total_samples += ramora_results.get('samples', 0)
+                    r_w, r_l = ramora_results.get('wins', 0), ramora_results.get('losses', 0)
+                    self.metrics.setdefault('ramora_wins', 0)
+                    self.metrics.setdefault('ramora_losses', 0)
+                    self.metrics.setdefault('ramora_draws', 0)
+                    self.metrics['ramora_wins'] += r_w
+                    self.metrics['ramora_losses'] += r_l
+                    self.metrics['ramora_draws'] += ramora_results.get('draws', 0)
+                except Exception as e:
+                    print(f"  |  SealBot games skipped: {e}")
+                    import traceback; traceback.print_exc()
+            self._last_ramora_time = time.perf_counter() - t_ramora_start
 
             gps = game_idx / t_selfplay if t_selfplay > 0 else 0
             print(f"  |  Self-play done: {game_idx} games, "
