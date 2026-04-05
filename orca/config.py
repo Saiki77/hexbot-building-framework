@@ -35,7 +35,7 @@ DISTANT_RANGE = (2, 5)       # min/max distance from nearest stone
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
-BATCH_SIZE = 1024             # training batch size
+BATCH_SIZE = 512              # training batch size (512 = faster on MPS, 1024 = CUDA)
 LEARNING_RATE = 0.001         # Adam optimizer LR
 L2_REG = 1e-4                 # weight decay
 REPLAY_BUFFER_SIZE = 400_000  # experience replay capacity

@@ -876,25 +876,33 @@ class OrcaTrainer:
                 n_ramora = 0
                 selfplay_games = current_games
 
-            # -- Launch self-play FIRST (runs in background workers) ----------
-            all_positions = self._build_position_mix(
-                selfplay_games, auto_tuner.params)
+            # -- GPU training FIRST (on existing buffer) ----------------------
+            # Train before generating new games — the buffer already has data
+            # from previous iterations. Network improves, then plays SealBot.
+            losses = {"total": 0, "value": 0, "policy": 0}
+            train_time = 0
+            actual_steps = auto_tuner.params.get("train_steps", self.train_steps)
+            if len(replay_buffer) >= BATCH_SIZE:
+                print(f"  |  Training: {actual_steps} steps on {self.device} "
+                      f"(batch={BATCH_SIZE}, buffer={len(replay_buffer)})...")
+                t1 = time.perf_counter()
+                self.net.train()
+                for step in range(actual_steps):
+                    losses = train_step(
+                        self.net, optimizer, replay_buffer, self.device,
+                        grad_scaler=grad_scaler)
+                train_time = time.perf_counter() - t1
+                sps = actual_steps / train_time if train_time > 0 else 0
+                scheduler.step()
+                print(f"  |  Training done: {train_time:.1f}s ({sps:.0f} steps/s) "
+                      f"loss={losses['total']:.4f} "
+                      f"(v={losses['value']:.4f} p={losses['policy']:.4f}) "
+                      f"lr={optimizer.param_groups[0]['lr']:.6f}")
+            else:
+                print(f"  |  Training skipped: buffer too small "
+                      f"({len(replay_buffer)}<{BATCH_SIZE})")
 
-            t_sp = time.perf_counter()
-            from concurrent.futures import ProcessPoolExecutor, as_completed
-            # Start self-play workers (non-blocking — they run while SealBot plays)
-            sp_result = self._run_self_play(
-                use_v2, current_sims, selfplay_games, all_positions,
-                onnx_path, replay_buffer)
-            t_selfplay = time.perf_counter() - t_sp
-
-            game_idx = sp_result["game_idx"]
-            total_samples += sp_result["total_samples"]
-            total_moves = sp_result["total_moves"]
-            wins = sp_result["wins"]
-            collected_samples.extend(sp_result["collected_samples"])
-
-            # -- Play SealBot games (sequential, uses main thread GPU) --------
+            # -- Play SealBot games (uses updated network) --------------------
             t_ramora_start = time.perf_counter()
             if n_ramora > 0:
                 try:
@@ -913,6 +921,22 @@ class OrcaTrainer:
                     print(f"  |  SealBot games skipped: {e}")
                     import traceback; traceback.print_exc()
             self._last_ramora_time = time.perf_counter() - t_ramora_start
+
+            # -- Self-play (small batch, parallel workers) --------------------
+            all_positions = self._build_position_mix(
+                selfplay_games, auto_tuner.params)
+
+            t_sp = time.perf_counter()
+            sp_result = self._run_self_play(
+                use_v2, current_sims, selfplay_games, all_positions,
+                onnx_path, replay_buffer)
+            t_selfplay = time.perf_counter() - t_sp
+
+            game_idx = sp_result["game_idx"]
+            total_samples += sp_result["total_samples"]
+            total_moves = sp_result["total_moves"]
+            wins = sp_result["wins"]
+            collected_samples.extend(sp_result["collected_samples"])
 
             gps = game_idx / t_selfplay if t_selfplay > 0 else 0
             print(f"  |  Self-play done: {game_idx} games, "
@@ -936,32 +960,6 @@ class OrcaTrainer:
                   f"-> buffer={len(replay_buffer)}/{replay_buffer.buffer.maxlen}")
 
             sp_time = time.perf_counter() - t0
-
-            # -- GPU training ------------------------------------------------
-            losses = {"total": 0, "value": 0, "policy": 0}
-            train_time = 0
-            actual_steps = auto_tuner.params.get("train_steps", self.train_steps)
-            if len(replay_buffer) >= BATCH_SIZE:
-                print(f"  |  Training: {actual_steps} steps on {self.device} "
-                      f"(batch={BATCH_SIZE}, buffer={len(replay_buffer)})...")
-                t1 = time.perf_counter()
-                self.net.train()
-                for step in range(actual_steps):
-                    losses = train_step(
-                        self.net, optimizer, replay_buffer, self.device,
-                        grad_scaler=grad_scaler)
-                train_time = time.perf_counter() - t1
-                sps = actual_steps / train_time if train_time > 0 else 0
-                scheduler.step()
-                current_lr = optimizer.param_groups[0]["lr"]
-                auto_tuner.params["lr"] = current_lr
-                print(f"  |  Training done: {train_time:.1f}s ({sps:.0f} steps/s) "
-                      f"loss={losses['total']:.4f} "
-                      f"(v={losses['value']:.4f} p={losses['policy']:.4f}) "
-                      f"lr={current_lr:.6f}")
-            else:
-                print(f"  |  Training skipped: buffer too small "
-                      f"({len(replay_buffer)}<{BATCH_SIZE})")
 
             # -- Pick up background ELO result from previous iteration --------
             elo_str = ""
