@@ -296,6 +296,9 @@ class MetricsStore:
                 'self_play_time': latest.get('self_play_time', 0),
                 'train_time': latest.get('train_time', 0),
                 'avg_game_length': latest.get('avg_game_length', 0),
+                'ramora_wins': latest.get('ramora_wins', 0),
+                'ramora_losses': latest.get('ramora_losses', 0),
+                'ramora_draws': latest.get('ramora_draws', 0),
             }
 
     def get_elo_history(self) -> List[dict]:
@@ -2482,16 +2485,14 @@ socket.on('game_complete', d => {
     const lsL = el('ls-len'); if (lsL && gameStats.count) lsL.textContent = Math.round(gameStats.totalLen / gameStats.count);
     const lsW0 = el('ls-w0'); if (lsW0 && gameStats.count) lsW0.textContent = Math.round(gameStats.w0 / gameStats.count * 100) + '%';
     const lsW1 = el('ls-w1'); if (lsW1 && gameStats.count) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
-    // Track Ramora/SealBot stats (use orca_result which is always from Orca's perspective)
+    // Track Ramora/SealBot stats per-game (session only, for live updates)
     if (d.game_type === 'vs_ramora') {
       if (!window._ramoraStats) window._ramoraStats = {w:0, l:0, d:0};
       const or_ = d.orca_result != null ? d.orca_result : d.result;
       if (or_ > 0) window._ramoraStats.w++;
       else if (or_ < 0) window._ramoraStats.l++;
       else window._ramoraStats.d++;
-      const rs = window._ramoraStats;
-      const rn = rs.w + rs.l + rs.d;
-      el('s-ramora-wr').textContent = rs.w + 'W/' + rs.l + 'L' + (rs.d ? '/' + rs.d + 'D' : '') + ' (' + Math.round(rs.w/rn*100) + '%)';
+      updateRamoraFooter(window._ramoraStats);
     }
     // Refresh charts after every game (live updates)
     fetchCharts();
@@ -2527,9 +2528,27 @@ socket.on('stats_update', d => {
       if (lv != null) el('ls-loss').textContent = parseFloat(lv).toFixed(4);
     }
     if (d.avg_game_length) el('ls-len').textContent = d.avg_game_length;
+    // Update Ramora cumulative stats from backend (persists across refreshes)
+    updateRamoraDisplay(d);
     fetchCharts();
   } catch (e) { console.error('stats_update error:', e); }
 });
+
+// Ramora stats display — uses backend cumulative data when available
+function updateRamoraDisplay(d) {
+  const rw = d.ramora_wins, rl = d.ramora_losses, rd = d.ramora_draws;
+  if (rw != null && rl != null) {
+    // Sync JS counter with backend totals
+    window._ramoraStats = {w: rw, l: rl, d: rd || 0};
+    updateRamoraFooter(window._ramoraStats);
+  }
+}
+function updateRamoraFooter(rs) {
+  const rn = rs.w + rs.l + rs.d;
+  if (rn > 0) {
+    el('s-ramora-wr').textContent = rs.w + 'W/' + rs.l + 'L' + (rs.d ? '/' + rs.d + 'D' : '') + ' (' + Math.round(rs.w/rn*100) + '%)';
+  }
+}
 
 socket.on('train_progress', d => {
   try {
