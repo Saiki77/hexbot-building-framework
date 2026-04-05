@@ -161,12 +161,30 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
 
     import time as _time, os as _os
 
+    import torch as _torch
+
     t_load = _time.perf_counter()
     net = create_network(net_config)
     migrated = migrate_checkpoint_5to7(dict(net_state_dict))
     migrated = migrate_checkpoint_filters(migrated)
     net.load_state_dict(migrated, strict=False)
     net.eval()
+
+    # Try GPU in subprocess (MPS/CUDA much faster than CPU)
+    _dev = 'cpu'
+    try:
+        if _torch.backends.mps.is_available():
+            net = net.to('mps')
+            _dev = 'mps'
+    except Exception:
+        pass
+    try:
+        if _dev == 'cpu' and _torch.cuda.is_available():
+            net = net.to('cuda')
+            _dev = 'cuda'
+    except Exception:
+        pass
+
     t_load = _time.perf_counter() - t_load
 
     if use_alphabeta:
@@ -175,7 +193,7 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
         searcher = BatchedMCTS(net, num_simulations=num_sims, batch_size=32)
 
     pid = _os.getpid()
-    _builtin_print(f"  |  [Worker {pid}] loaded in {t_load:.1f}s, "
+    _builtin_print(f"  |  [Worker {pid}] loaded in {t_load:.1f}s on {_dev}, "
                    f"playing {games} games ({num_sims} sims)")
 
     results = []
