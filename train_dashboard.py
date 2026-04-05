@@ -669,7 +669,23 @@ class TrainingManager:
             observer=self.observer,
             resume=True,
         )
-        self._trainer.run()
+        try:
+            self._trainer.run()
+        except Exception as e:
+            print(f"\n{'!'*60}")
+            print(f"  FATAL TRAINING CRASH: {e}")
+            print(f"{'!'*60}")
+            import traceback; traceback.print_exc()
+            # Emergency checkpoint
+            try:
+                import torch
+                torch.save({
+                    "model_state_dict": self._trainer.net.state_dict(),
+                    "elo": self._trainer.metrics.get("current_elo", 1000),
+                }, "hex_checkpoint_crash.pt")
+                print(f"  |  Emergency checkpoint saved: hex_checkpoint_crash.pt")
+            except Exception:
+                print(f"  |  Could not save emergency checkpoint")
 
         # Sync state back for dashboard access
         self.net = self._trainer.net

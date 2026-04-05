@@ -155,7 +155,8 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
         from bot import (CGameState, BatchedMCTS, BatchedNNAlphaBeta,
                          self_play_game_v2, create_network,
                          migrate_checkpoint_5to7, migrate_checkpoint_filters)
-    except ImportError:
+    except ImportError as e:
+        print(f"  |  FATAL: Worker import failed: {e}")
         return []
 
     import time as _time, os as _os
@@ -426,7 +427,8 @@ class GenerationalArena:
                             else:
                                 candidates = game.legal_moves()
                                 best = candidates[0] if candidates else (0, 0)
-                        except Exception:
+                        except Exception as e:
+                            print(f"  |  WARN: Heuristic baseline error: {e}")
                             candidates = game.legal_moves()
                             best = candidates[0] if candidates else (0, 0)
                 game.place_stone(*best)
@@ -826,9 +828,10 @@ class OrcaTrainer:
             self.net.to(self.device)
             print(f"  |  ONNX export: {time.perf_counter() - t_exp:.1f}s")
 
-            # -- Play games vs Ramora MinimaxBot (15% of iteration, first) --
+            # -- Play games vs SealBot (first) --------------------------------
             collected_samples = []
             total_samples = 0
+            t_ramora_start = time.perf_counter()
             try:
                 from orca.config import RAMORA_GAME_FRACTION, RAMORA_TIME_LIMIT
                 n_ramora = max(1, int(current_games * RAMORA_GAME_FRACTION))
@@ -844,6 +847,8 @@ class OrcaTrainer:
                 self.metrics['ramora_draws'] += ramora_results.get('draws', 0)
             except Exception as e:
                 print(f"  |  Ramora games skipped: {e}")
+                import traceback; traceback.print_exc()
+            self._last_ramora_time = time.perf_counter() - t_ramora_start
 
             # Build position mix
             all_positions = self._build_position_mix(
@@ -1014,16 +1019,33 @@ class OrcaTrainer:
             for pg in optimizer.param_groups:
                 pg["lr"] = new_params["lr"]
 
-            print(f"  +-- Iter {iteration + 1} done: {total_time:.1f}s total "
+            # -- Detailed iteration summary ------------------------------------
+            import psutil
+            ram = psutil.virtual_memory()
+            mem_line = f"RAM {ram.percent}% ({ram.used/1e9:.1f}/{ram.total/1e9:.1f}GB)"
+            if self.device.type == 'cuda':
+                gpu_alloc = torch.cuda.memory_allocated() / 1e9
+                gpu_peak = torch.cuda.max_memory_allocated() / 1e9
+                gpu_total = getattr(torch.cuda.get_device_properties(0),
+                                    'total_memory', 0) / 1e9
+                mem_line += f" | GPU {gpu_alloc:.1f}/{gpu_total:.1f}GB (peak {gpu_peak:.1f}GB)"
+                torch.cuda.reset_peak_memory_stats()
+
+            t_ramora = getattr(self, '_last_ramora_time', 0)
+            print(f"  |  Buffer: {len(replay_buffer):,} samples | {mem_line}")
+            print(f"  |  Timing: ramora={t_ramora:.1f}s sp={t_selfplay:.1f}s "
+                  f"train={train_time:.1f}s total={total_time:.1f}s")
+            print(f"  +-- Iter {iteration + 1} done: {total_time:.1f}s "
                   f"| {game_idx} games | {total_samples} samples{elo_str}")
             print()
 
-            # -- Checkpoint (every 5 iterations) -----------------------------
-            if (iteration + 1) % 5 == 0:
+            # -- Checkpoint -------------------------------------------------------
+            from orca.config import CHECKPOINT_EVERY
+            if (iteration + 1) % CHECKPOINT_EVERY == 0:
                 self._save_checkpoint(
                     iteration, optimizer, scheduler, replay_buffer, auto_tuner)
 
-        # -- Done ------------------------------------------------------------
+
         print(f"\n{'=' * 60}")
         print(f"  TRAINING COMPLETE -- {self.num_iterations} iterations")
         print(f"  Final ELO: {self.metrics['current_elo']:.0f}")
@@ -1070,8 +1092,8 @@ class OrcaTrainer:
             if "scheduler_state_dict" in ckpt:
                 try:
                     scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"  |  WARN: Scheduler restore failed: {e}")
 
             # Restore replay buffer
             buf_path = os.path.join(os.path.dirname(resume_path),
@@ -1150,8 +1172,9 @@ class OrcaTrainer:
                     collected_samples.append(s)
                 self._online_lines_read = new_pos
                 print(f"  |  Online games: +{len(online_samples)} samples")
-        except Exception:
-            pass
+        except Exception as e:
+            if str(e):
+                print(f"  |  WARN: Online games load failed: {e}")
 
     def _play_vs_ramora_batch(self, n_games: int, current_sims: int,
                               replay_buffer: ReplayBuffer,
@@ -1681,8 +1704,8 @@ All parameters default to values in orca/config.py. CLI args override config.
         try:
             import orca.config
             orca.config.USE_AB_HYBRID = False
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"WARN: Could not disable AB hybrid: {e}")
 
     trainer = OrcaTrainer(
         iterations=args.iterations,
