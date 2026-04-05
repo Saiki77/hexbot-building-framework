@@ -943,10 +943,13 @@ class OrcaTrainer:
                 train_time = time.perf_counter() - t1
                 sps = actual_steps / train_time if train_time > 0 else 0
                 scheduler.step()
+                self._last_policy_loss = losses.get('policy', 99.0)
+                soft_mode = "SOFT" if self._last_policy_loss < 3.0 else "ONE-HOT"
                 print(f"  |  Training done: {train_time:.1f}s ({sps:.0f} steps/s) "
                       f"loss={losses['total']:.4f} "
                       f"(v={losses['value']:.4f} p={losses['policy']:.4f}) "
-                      f"lr={optimizer.param_groups[0]['lr']:.6f}")
+                      f"lr={optimizer.param_groups[0]['lr']:.6f} "
+                      f"[policy targets: {soft_mode}]")
             else:
                 print(f"  |  Training skipped: buffer too small "
                       f"({len(replay_buffer)}<{BATCH_SIZE})")
@@ -1311,14 +1314,34 @@ class OrcaTrainer:
                 decay = GAMMA ** distance_from_end
 
                 if who == 'orca':
-                    # --- Orca's move: one-hot target for chosen move ---
-                    # Soft MCTS targets cause loss=7.5 with random weights
-                    # (near-uniform distributions create huge cross-entropy).
-                    # Use one-hot until network has basic patterns, then upgrade.
+                    # --- Orca's move ---
+                    # Auto-switch: one-hot when loss is high (random network),
+                    # soft MCTS distribution once network has basic patterns.
+                    use_soft = (hasattr(self, '_last_policy_loss') and
+                                self._last_policy_loss < 3.0 and
+                                orca_policy_idx < len(orca_policies) and
+                                orca_policies[orca_policy_idx])
+
                     policy_target = np.zeros(19 * 19, dtype=np.float32)
-                    iq, ir = q - oq, r - orr
-                    if 0 <= iq < 19 and 0 <= ir < 19:
-                        policy_target[iq * 19 + ir] = 1.0
+                    if use_soft:
+                        # Soft MCTS distribution (better signal once network is trained)
+                        for (mq, mr), prob in orca_policies[orca_policy_idx].items():
+                            mi, mj = mq - oq, mr - orr
+                            if 0 <= mi < 19 and 0 <= mj < 19:
+                                policy_target[mi * 19 + mj] = prob
+                        s = policy_target.sum()
+                        if s > 1e-6:
+                            policy_target /= s
+                        else:
+                            policy_target = np.zeros(19 * 19, dtype=np.float32)
+                            iq, ir = q - oq, r - orr
+                            if 0 <= iq < 19 and 0 <= ir < 19:
+                                policy_target[iq * 19 + ir] = 1.0
+                    else:
+                        # One-hot (safe for random/early network)
+                        iq, ir = q - oq, r - orr
+                        if 0 <= iq < 19 and 0 <= ir < 19:
+                            policy_target[iq * 19 + ir] = 1.0
                     if orca_policy_idx < len(orca_policies):
                         orca_policy_idx += 1
 
