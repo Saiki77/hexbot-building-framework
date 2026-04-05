@@ -943,6 +943,9 @@ def play_move():
 
     game.place_stone(q, r)
     session['moves'].append(('human', q, r))
+    # Keep ramora game in sync (for SealBot)
+    if '_rgame' in session:
+        session['_rgame'].make_move(q, r)
 
     result = {'moves': [{'who': 'human', 'q': q, 'r': r}], 'game_over': False}
 
@@ -996,11 +999,15 @@ def _play_bot_move(session):
         try:
             from opponents.ramora.adapter import create_ramora_bot
             from opponents.ramora.game import HexGame as RamoraGame
-            sealbot = create_ramora_bot(time_limit=2.0)
-            # Rebuild Ramora game state from moves
-            rgame = RamoraGame()
-            for who, q, r in session['moves']:
-                rgame.make_move(q, r)
+            # Cache sealbot + ramora game in session to preserve TT across moves
+            if '_sealbot' not in session:
+                session['_sealbot'] = create_ramora_bot(time_limit=2.0)
+                session['_rgame'] = RamoraGame()
+                # Replay existing moves into ramora game
+                for who, q, r in session['moves']:
+                    session['_rgame'].make_move(q, r)
+            sealbot = session['_sealbot']
+            rgame = session['_rgame']
             result = sealbot.get_move(rgame)
             if result:
                 for m in result:
@@ -1008,6 +1015,7 @@ def _play_bot_move(session):
                         break
                     q, r = m[0], m[1]
                     game.place_stone(q, r)
+                    rgame.make_move(q, r)  # keep ramora game in sync
                     session['moves'].append(('bot', q, r))
                     bot_moves.append({'who': 'bot', 'q': q, 'r': r})
         except Exception as e:

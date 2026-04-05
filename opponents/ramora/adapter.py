@@ -29,9 +29,6 @@ def create_ramora_bot(time_limit: float = 1.0):
         for d in [_sealbot_best, _sealbot_current]:
             if d not in sys.path:
                 sys.path.insert(0, d)
-        # Force reimport to get the right .so
-        if 'minimax_cpp' in sys.modules:
-            del sys.modules['minimax_cpp']
         from minimax_cpp import MinimaxBot as SealBot
         bot = SealBot(time_limit)
         print(f"  |  SealBot loaded: depth_limit={bot.max_depth}, time={time_limit}s")
