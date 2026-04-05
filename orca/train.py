@@ -1155,24 +1155,13 @@ class OrcaTrainer:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from orca.data import self_play_game_v2
 
-        # Use C MCTS (GIL-free) if available, else fall back to Python
-        use_c_mcts = False
-        try:
-            from orca.c_mcts import CMCTSSearch
-            use_c_mcts = True
-        except Exception:
-            pass
+        # Use Python BatchedMCTS for threaded mode (C MCTS segfaults in threads)
+        from orca.search import BatchedMCTS
 
         self.net.eval()
-        if use_c_mcts:
-            print(f"  |  Self-play: C MCTS threaded ({self.device}, "
-                  f"{self.num_workers} threads, {current_sims} sims)...")
-            mcts = CMCTSSearch(self.net, num_simulations=current_sims, batch_size=64)
-        else:
-            from orca.search import BatchedMCTS
-            print(f"  |  Self-play: threaded ({self.device}, "
-                  f"{self.num_workers} threads, {current_sims} sims)...")
-            mcts = BatchedMCTS(self.net, num_simulations=current_sims, batch_size=64)
+        print(f"  |  Self-play: threaded ({self.device}, "
+              f"{self.num_workers} threads, {current_sims} sims)...")
+        mcts = BatchedMCTS(self.net, num_simulations=current_sims, batch_size=64)
 
         total_samples = 0
         total_moves = 0
@@ -1265,8 +1254,14 @@ class OrcaTrainer:
         # forward_pv calls even with C MCTS (MPS backend isn't thread-safe).
         # C MCTS still helps MPS via the process-based path (2x faster search).
         if use_v2 and self.device.type == 'cuda':
-            return self._run_gpu_self_play(
-                current_sims, current_games, all_positions, replay_buffer)
+            try:
+                return self._run_gpu_self_play(
+                    current_sims, current_games, all_positions, replay_buffer)
+            except Exception as e:
+                print(f"  |  GPU self-play failed: {e}")
+                import traceback; traceback.print_exc()
+                print(f"  |  Falling back to process-based self-play...")
+                # Fall through to process-based path
 
         if use_v2:
             net_state = {k: v.cpu() for k, v in self.net.state_dict().items()}
