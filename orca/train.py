@@ -891,6 +891,11 @@ class OrcaTrainer:
                     losses = train_step(
                         self.net, optimizer, replay_buffer, self.device,
                         grad_scaler=grad_scaler)
+                    if (step + 1) % 50 == 0:
+                        elapsed = time.perf_counter() - t1
+                        print(f"  |    step {step+1}/{actual_steps} "
+                              f"loss={losses['total']:.4f} "
+                              f"({elapsed:.0f}s, {(step+1)/elapsed:.1f} steps/s)")
                 train_time = time.perf_counter() - t1
                 sps = actual_steps / train_time if train_time > 0 else 0
                 scheduler.step()
