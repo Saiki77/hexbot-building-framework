@@ -359,14 +359,21 @@ class GenerationalArena:
             matchups["vs_heuristic"] = {"w": w_heur, "l": l_heur, "d": 0}
             total_wins += w_heur; total_losses += l_heur
 
-        # 4. Play against Ramora MinimaxBot (anchored at ~1200 ELO)
+        # 4. Play against SealBot (anchored at ~1200 ELO + survival bonus)
         w_ramora = l_ramora = 0
+        avg_survival = 0
         try:
-            w_ramora, l_ramora = self._play_vs_ramora(mcts_cur)
-            matchups["vs_ramora"] = {"w": w_ramora, "l": l_ramora, "d": 0}
+            w_ramora, l_ramora, avg_survival = self._play_vs_ramora(mcts_cur)
+            matchups["vs_ramora"] = {
+                "w": w_ramora, "l": l_ramora, "d": 0,
+                "avg_survival": round(avg_survival, 1),
+            }
             total_wins += w_ramora; total_losses += l_ramora
+            print(f"  |  vs SealBot: {w_ramora}W/{l_ramora}L "
+                  f"avg_survival={avg_survival:.0f} moves")
         except Exception as e:
-            print(f"  |  Ramora eval skipped: {e}")
+            print(f"  |  SealBot eval skipped: {e}")
+            import traceback; traceback.print_exc()
 
         self.matchup_history.append(matchups)
 
@@ -389,9 +396,14 @@ class GenerationalArena:
             heur_elo = 1000 + 400 * math.log10(heur_wr / (1 - heur_wr))
 
             if w_ramora + l_ramora > 0:
+                # Survival-based scoring: even losing, surviving longer = progress
+                # Win = 1.0, Loss with 50+ moves = 0.3, Loss with 30 moves = 0.15
+                survival_bonus = min(avg_survival / 150.0, 0.4) if avg_survival > 0 else 0
                 ramora_wr = w_ramora / max(w_ramora + l_ramora, 1)
-                ramora_wr = max(0.05, min(0.95, ramora_wr))
-                ramora_elo = 1200 + 400 * math.log10(ramora_wr / (1 - ramora_wr))
+                # Add survival bonus: losing at 50 moves counts as ~0.3 instead of 0
+                effective_wr = ramora_wr + (1 - ramora_wr) * survival_bonus
+                effective_wr = max(0.05, min(0.95, effective_wr))
+                ramora_elo = 1200 + 400 * math.log10(effective_wr / (1 - effective_wr))
                 new_elo = 0.5 * gen_elo + 0.15 * rand_elo + 0.15 * heur_elo + 0.2 * ramora_elo
             else:
                 new_elo = 0.6 * gen_elo + 0.2 * rand_elo + 0.2 * heur_elo
@@ -440,17 +452,24 @@ class GenerationalArena:
         return wins, losses
 
     def _play_vs_ramora(self, mcts_cur):
-        """Play against Ramora's MinimaxBot. Returns (wins, losses)."""
+        """Play against SealBot. Returns (wins, losses, avg_survival).
+        avg_survival = average game length when losing (higher = better defense).
+        """
         from opponents.ramora.adapter import play_match, create_ramora_bot
         from orca.config import RAMORA_TIME_LIMIT
         ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
         wins = losses = 0
+        survival_moves = []
         for g in range(self.baseline_games):
             orca_first = (g % 2 == 0)
             result = play_match(mcts_cur, None, ramora, orca_plays_first=orca_first)
-            if result['winner'] == 'orca': wins += 1
-            elif result['winner'] == 'ramora': losses += 1
-        return wins, losses
+            if result['winner'] == 'orca':
+                wins += 1
+            elif result['winner'] == 'ramora':
+                losses += 1
+                survival_moves.append(result['num_moves'])
+        avg_survival = sum(survival_moves) / max(len(survival_moves), 1)
+        return wins, losses, avg_survival
 
     def _select_opponents(self, n: int) -> list:
         if n <= self.max_opponents:
