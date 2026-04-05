@@ -380,20 +380,10 @@ class GenerationalArena:
             total_wins += w_heur; total_losses += l_heur
 
         # 4. Play against SealBot (anchored at ~1200 ELO + survival bonus)
+        # Skip SealBot in ELO eval — already tracked separately from training games.
+        # SealBot ELO games are slow and redundant.
         w_ramora = l_ramora = 0
         avg_survival = 0
-        try:
-            w_ramora, l_ramora, avg_survival = self._play_vs_ramora(mcts_cur)
-            matchups["vs_ramora"] = {
-                "w": w_ramora, "l": l_ramora, "d": 0,
-                "avg_survival": round(avg_survival, 1),
-            }
-            total_wins += w_ramora; total_losses += l_ramora
-            print(f"  |  vs SealBot: {w_ramora}W/{l_ramora}L "
-                  f"avg_survival={avg_survival:.0f} moves")
-        except Exception as e:
-            print(f"  |  SealBot eval skipped: {e}")
-            import traceback; traceback.print_exc()
 
         self.matchup_history.append(matchups)
 

@@ -48,11 +48,11 @@ DEFAULT_GAMES_PER_ITER = 100  # base games (curriculum may adjust)
 CHECKPOINT_EVERY = 1          # save checkpoint every N iterations
 MAX_WORKERS = 5               # parallel self-play workers
 GAMES_PER_FUTURE = 2          # games per subprocess future
-ELO_EVAL_EVERY = 1            # ELO evaluation frequency (iterations)
-ELO_EVAL_GAMES = 5            # games per ELO opponent
-ELO_EVAL_SIMS = 30            # MCTS sims during ELO games (lower = faster eval)
-ELO_MAX_OPPONENTS = 5         # max past versions to play against
-ELO_BASELINE_GAMES = 4        # games vs random + heuristic baselines (0 = disable)
+ELO_EVAL_EVERY = 3            # ELO evaluation frequency (every 3 iterations)
+ELO_EVAL_GAMES = 2            # games per ELO opponent (fast eval)
+ELO_EVAL_SIMS = 30            # MCTS sims during ELO games
+ELO_MAX_OPPONENTS = 3         # max past versions to play against
+ELO_BASELINE_GAMES = 2        # games vs random + heuristic baselines
 
 # ---------------------------------------------------------------------------
 # Model vault
