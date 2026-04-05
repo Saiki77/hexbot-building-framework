@@ -535,7 +535,7 @@ class AutoTuner:
         self.decisions: list = []
 
         self.params = {
-            "lr": 0.002,
+            "lr": 0.001,
             "sims": 10,
             "mix_normal": 0.60,
             "mix_catalog": 0.05,
@@ -1311,28 +1311,16 @@ class OrcaTrainer:
                 decay = GAMMA ** distance_from_end
 
                 if who == 'orca':
-                    # --- Orca's move: use MCTS distribution as soft policy target ---
+                    # --- Orca's move: one-hot target for chosen move ---
+                    # Soft MCTS targets cause loss=7.5 with random weights
+                    # (near-uniform distributions create huge cross-entropy).
+                    # Use one-hot until network has basic patterns, then upgrade.
                     policy_target = np.zeros(19 * 19, dtype=np.float32)
-                    if orca_policy_idx < len(orca_policies) and orca_policies[orca_policy_idx]:
-                        # Soft target from MCTS search distribution
-                        for (mq, mr), prob in orca_policies[orca_policy_idx].items():
-                            mi, mj = mq - oq, mr - orr
-                            if 0 <= mi < 19 and 0 <= mj < 19:
-                                policy_target[mi * 19 + mj] = prob
-                        s = policy_target.sum()
-                        if s > 1e-6:
-                            policy_target /= s
-                        else:
-                            # Fallback to one-hot
-                            iq, ir = q - oq, r - orr
-                            if 0 <= iq < 19 and 0 <= ir < 19:
-                                policy_target[iq * 19 + ir] = 1.0
-                    else:
-                        # No MCTS policy available, use one-hot
-                        iq, ir = q - oq, r - orr
-                        if 0 <= iq < 19 and 0 <= ir < 19:
-                            policy_target[iq * 19 + ir] = 1.0
-                    orca_policy_idx += 1
+                    iq, ir = q - oq, r - orr
+                    if 0 <= iq < 19 and 0 <= ir < 19:
+                        policy_target[iq * 19 + ir] = 1.0
+                    if orca_policy_idx < len(orca_policies):
+                        orca_policy_idx += 1
 
                     # Recency-weighted priority (late game matters more)
                     recency = (idx + 1) / max(n_moves, 1)
