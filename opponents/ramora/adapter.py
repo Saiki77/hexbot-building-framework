@@ -1,15 +1,38 @@
-"""Adapter to play Orca against Ramora's MinimaxBot.
+"""Adapter to play Orca against SealBot (Ramora's C++ engine).
 
-Translates between our CGameState/MCTS interface and Ramora's HexGame interface.
+Translates between our CGameState/MCTS interface and SealBot's HexGame interface.
+Uses the compiled C++ minimax_cpp module for much stronger play than the
+pure Python MinimaxBot.
 """
 
-from opponents.ramora.ai import MinimaxBot
+import os
+import sys
+
+# Use SealBot's game.py (same interface as ramora's)
+_sealbot_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'sealbot')
+_sealbot_current = os.path.join(_sealbot_dir, 'current')
+
+# Import game types from the local ramora copy (same interface as SealBot's)
 from opponents.ramora.game import HexGame, Player
 
 
-def create_ramora_bot(time_limit: float = 1.0) -> MinimaxBot:
-    """Create a Ramora MinimaxBot with the learned pattern evaluation."""
-    return MinimaxBot(time_limit=time_limit)
+def create_ramora_bot(time_limit: float = 1.0):
+    """Create SealBot C++ engine (much stronger than Python MinimaxBot).
+    Falls back to Python MinimaxBot if C++ module not compiled."""
+    try:
+        # SealBot needs its own game.py importable as 'game'
+        if _sealbot_dir not in sys.path:
+            sys.path.insert(0, _sealbot_dir)
+        if _sealbot_current not in sys.path:
+            sys.path.insert(0, _sealbot_current)
+        from minimax_cpp import MinimaxBot as SealBot
+        bot = SealBot(time_limit)
+        return bot
+    except Exception:
+        print("  |  WARNING: SealBot C++ not compiled, falling back to Python MinimaxBot")
+        print("  |  To compile: cd opponents/sealbot/current && python setup.py build_ext --inplace")
+        from opponents.ramora.ai import MinimaxBot
+        return MinimaxBot(time_limit=time_limit)
 
 
 def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_moves=200):
