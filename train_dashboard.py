@@ -1009,15 +1009,19 @@ def _play_bot_move(session):
             sealbot = session['_sealbot']
             rgame = session['_rgame']
             result = sealbot.get_move(rgame)
-            if result:
-                for m in result:
-                    if game.is_terminal:
-                        break
-                    q, r = m[0], m[1]
-                    game.place_stone(q, r)
-                    rgame.make_move(q, r)  # keep ramora game in sync
-                    session['moves'].append(('bot', q, r))
-                    bot_moves.append({'who': 'bot', 'q': q, 'r': r})
+            print(f"  |  SealBot raw result: {result}")
+            print(f"  |  SealBot depth={sealbot.last_depth} score={sealbot.last_score:.1f} nodes={sealbot._nodes}")
+            # Copy result — pybind11 list may be mutable
+            moves_to_play = list(result) if result else []
+            for m in moves_to_play:
+                if game.is_terminal:
+                    break
+                q, r = m[0], m[1]
+                print(f"  |  Applying SealBot move: ({q},{r})")
+                game.place_stone(q, r)
+                rgame.make_move(q, r)
+                session['moves'].append(('bot', q, r))
+                bot_moves.append({'who': 'bot', 'q': q, 'r': r})
         except Exception as e:
             print(f"  |  SealBot play error: {e}")
             import traceback; traceback.print_exc()
