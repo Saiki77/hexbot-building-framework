@@ -869,14 +869,21 @@ class OrcaTrainer:
                 import traceback; traceback.print_exc()
             self._last_ramora_time = time.perf_counter() - t_ramora_start
 
+            # Self-play gets the remaining games (total - ramora)
+            try:
+                from orca.config import RAMORA_GAME_FRACTION
+                selfplay_games = max(5, current_games - int(current_games * RAMORA_GAME_FRACTION))
+            except ImportError:
+                selfplay_games = current_games
+
             # Build position mix
             all_positions = self._build_position_mix(
-                current_games, auto_tuner.params)
+                selfplay_games, auto_tuner.params)
 
             # -- Self-play ---------------------------------------------------
             t_sp = time.perf_counter()
             sp_result = self._run_self_play(
-                use_v2, current_sims, current_games, all_positions,
+                use_v2, current_sims, selfplay_games, all_positions,
                 onnx_path, replay_buffer)
             t_selfplay = time.perf_counter() - t_sp
 
