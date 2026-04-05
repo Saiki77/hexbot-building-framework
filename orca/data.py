@@ -922,7 +922,11 @@ def self_play_game_v2(
         # Let MCTS decide everything - no forced moves during training.
         policy = mcts.search(game, temperature=temperature, add_noise=add_noise)
         if not policy:
-            break
+            # MCTS failed (broken network?) — place random candidate to continue
+            cands = game.candidates if hasattr(game, 'candidates') else game.legal_moves()
+            if not cands:
+                break
+            policy = {cands[random.randint(0, len(cands) - 1)]: 1.0}
 
         # --- DISTANT EXPLORATION: inject ONE gap candidate with small prob ---
         # Subtle: only 1 stone, only 2% probability, only in first 10 moves

@@ -992,75 +992,49 @@ class OrcaTrainer:
 
             sp_time = time.perf_counter() - t0
 
-            # -- Pick up background ELO result from previous iteration --------
             elo_str = ""
-            if hasattr(self, '_elo_result') and self._elo_result is not None:
-                new_elo, elo_iter = self._elo_result
-                self._elo_result = None
-                delta = new_elo - self.metrics["current_elo"]
-                sign = "+" if delta >= 0 else ""
-                self.metrics["current_elo"] = new_elo
-                self.metrics["elo_history"].append(
-                    {"iteration": elo_iter, "elo": round(new_elo, 1)})
-                update_curriculum_plateau(new_elo)
-                elo_str = f" | ELO {new_elo:.0f} ({sign}{delta:.0f})"
-                stall = (f" stall={_curriculum_stall_iters}"
-                         if _curriculum_stall_iters > 0 else "")
 
-                best = self.metrics.get("best_elo", 1000.0)
-                if new_elo > best:
-                    self.metrics["best_elo"] = new_elo
-                    self.metrics["best_iteration"] = elo_iter
-                    torch.save({"model_state_dict": self.net.state_dict(),
-                                "iteration": elo_iter, "elo": new_elo},
-                               "hex_best.pt")
-                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
-                          f"NEW BEST (saved hex_best.pt) {stall}")
-                else:
-                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
-                          f"(best: {best:.0f} @ iter {self.metrics.get('best_iteration', '?')}) "
-                          f"{stall}")
-
-            # -- Launch background ELO evaluation ------------------------------
+            # -- ELO evaluation ------------------------------
             # Always add to vault (even if eval is running)
             self.model_vault.add(iteration + 1, self.net.state_dict())
 
-            elo_thread = getattr(self, '_elo_thread', None)
-            elo_running = elo_thread is not None and elo_thread.is_alive()
-            if elo_thread is not None and not elo_thread.is_alive():
-                self._elo_thread = None  # Clean up finished thread
+            # -- ELO evaluation (synchronous — MPS can't do background inference)
             if (len(replay_buffer) >= BATCH_SIZE
                     and (iteration + 1) % self.elo_every == 0
-                    and not elo_running):
+                    and len(self.model_vault) > 1):
                 n_opp = min(self.arena.max_opponents,
                             len(self.model_vault) - 1)
-                n_eval_games = n_opp * self.arena.games_per_opponent
-                print(f"  |  ELO evaluation started in background ({n_eval_games} games vs "
-                      f"{n_opp} generations, vault={len(self.model_vault)})")
+                n_eval_games = (n_opp * self.arena.games_per_opponent
+                               + self.arena.baseline_games * 2)  # +random +heuristic
+                print(f"  |  ELO evaluation ({n_eval_games} games vs "
+                      f"{n_opp} generations + baselines, "
+                      f"vault={len(self.model_vault)})...")
+                t_elo = time.perf_counter()
+                try:
+                    self.net.eval()
+                    new_elo = self.arena.evaluate(
+                        self.net, self.model_vault, self.metrics["current_elo"])
+                    delta = new_elo - self.metrics["current_elo"]
+                    sign = "+" if delta >= 0 else ""
+                    self.metrics["current_elo"] = new_elo
+                    self.metrics["elo_history"].append(
+                        {"iteration": iteration + 1, "elo": round(new_elo, 1)})
+                    update_curriculum_plateau(new_elo)
+                    elo_str = f" | ELO {new_elo:.0f} ({sign}{delta:.0f})"
+                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
+                          f"in {time.perf_counter() - t_elo:.1f}s")
 
-                # Copy weights so training can continue
-                eval_state = {k: v.clone() for k, v in self.net.state_dict().items()}
-                current_elo = self.metrics["current_elo"]
-                eval_iter = iteration + 1
-
-                def _elo_worker(state_dict, cur_elo, iter_num):
-                    try:
-                        eval_net = create_network(self.net_config)
-                        eval_net.load_state_dict(state_dict)
-                        eval_net.to(self.device)
-                        eval_net.eval()
-                        new_elo = self.arena.evaluate(
-                            eval_net, self.model_vault, cur_elo)
-                        self._elo_result = (new_elo, iter_num)
-                        del eval_net
-                    except Exception as e:
-                        print(f"  |  ELO worker error: {e}")
-
-                self._elo_thread = threading.Thread(
-                    target=_elo_worker,
-                    args=(eval_state, current_elo, eval_iter),
-                    daemon=True)
-                self._elo_thread.start()
+                    best = self.metrics.get("best_elo", 1000.0)
+                    if new_elo > best:
+                        self.metrics["best_elo"] = new_elo
+                        self.metrics["best_iteration"] = iteration + 1
+                        torch.save({"model_state_dict": self.net.state_dict(),
+                                    "iteration": iteration + 1, "elo": new_elo},
+                                   "hex_best.pt")
+                        print(f"  |  NEW BEST ELO (saved hex_best.pt)")
+                except Exception as e:
+                    print(f"  |  ELO eval error: {e}")
+                    import traceback; traceback.print_exc()
 
             # -- Metrics & AutoTuner -----------------------------------------
             avg_len = total_moves / max(game_idx, 1)
