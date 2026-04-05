@@ -76,12 +76,10 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
             for _ in range(stones_to_play):
                 if ramora_game.game_over or orca_game.is_terminal:
                     break
-                # Explore in first 15 moves (temperature=1.0 + noise)
-                # then play greedily (temperature=0.1, no noise)
-                if total_stones < 15:
-                    policy = orca_search.search(orca_game, temperature=1.0, add_noise=True)
-                else:
-                    policy = orca_search.search(orca_game, temperature=0.1, add_noise=False)
+                # Always explore — temperature=0.8 + noise for diverse training data.
+                # Without this, every game is identical (same losing patterns).
+                # The network needs to see many different positions to generalize.
+                policy = orca_search.search(orca_game, temperature=0.8, add_noise=True)
                 if not policy:
                     break
                 best_move = max(policy, key=policy.get)
