@@ -2265,6 +2265,8 @@ socket.on('game_complete', d => {
       const rn = rs.w + rs.l + rs.d;
       el('s-ramora-wr').textContent = rs.w + 'W/' + rs.l + 'L' + (rs.d ? '/' + rs.d + 'D' : '') + ' (' + Math.round(rs.w/rn*100) + '%)';
     }
+    // Refresh charts after every game (live updates)
+    fetchCharts();
     // History + replay (NEVER interrupt a playing game)
     if (d.moves && d.moves.length) {
       // Store analysis data if present
