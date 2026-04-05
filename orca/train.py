@@ -876,12 +876,97 @@ class OrcaTrainer:
                 n_ramora = 0
                 selfplay_games = current_games
 
-            # -- GPU training FIRST (on existing buffer) ----------------------
-            # Train before generating new games — the buffer already has data
-            # from previous iterations. Network improves, then plays SealBot.
+            # -- PARALLEL: Train on GPU + SealBot games on CPU -----------------
+            # Training uses self.net on GPU. SealBot games use a COPY on CPU.
+            # They run simultaneously — GPU trains while SealBot's C++ thinks.
             losses = {"total": 0, "value": 0, "policy": 0}
             train_time = 0
             actual_steps = auto_tuner.params.get("train_steps", self.train_steps)
+
+            # Start SealBot games in background thread (uses net copy on CPU)
+            t_ramora_start = time.perf_counter()
+            seal_thread = None
+            seal_result = [None]  # mutable container for thread result
+            if n_ramora > 0:
+                # Clone network for SealBot games (doesn't interfere with training)
+                seal_net = create_network(self.net_config)
+                seal_net.load_state_dict(self.net.state_dict())
+                seal_net.to(self.device)
+                seal_net.eval()
+
+                def _seal_worker():
+                    try:
+                        from orca.config import RAMORA_TIME_LIMIT
+                        from orca.search import BatchedMCTS
+                        seal_mcts = BatchedMCTS(seal_net, num_simulations=min(current_sims, 50), batch_size=64)
+                        from opponents.ramora.adapter import create_ramora_bot, play_match
+                        ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
+                        print(f"  |  SealBot games: {n_ramora} games starting in background...")
+
+                        _wins = _losses = _draws = 0
+                        _samples = []
+                        from orca.encoding import CGameState, c_encode_state
+                        from orca.data import TrainingSample
+                        import numpy as np
+
+                        for i in range(n_ramora):
+                            if self.observer.should_stop():
+                                break
+                            orca_first = (i % 2 == 0)
+                            result = play_match(seal_mcts, seal_net, ramora, orca_plays_first=orca_first)
+
+                            game = CGameState(max_total_stones=200)
+                            moves = result['moves']
+                            for idx, (who, q, r) in enumerate(moves):
+                                if who == 'orca':
+                                    enc, oq, orr = c_encode_state(game)
+                                    policy_target = np.zeros(19 * 19, dtype=np.float32)
+                                    iq, ir = q - oq, r - orr
+                                    if 0 <= iq < 19 and 0 <= ir < 19:
+                                        policy_target[iq * 19 + ir] = 1.0
+                                    game_result = 1.0 if result['winner'] == 'orca' else -1.0
+                                    s = TrainingSample(
+                                        encoded_state=enc,
+                                        policy_target=policy_target,
+                                        player=game.current_player,
+                                        result=game_result,
+                                        priority=2.0,
+                                    )
+                                    _samples.append(s)
+                                game.place_stone(q, r)
+
+                            w = result['winner']
+                            if w == 'orca': _wins += 1
+                            elif w == 'ramora': _losses += 1
+                            else: _draws += 1
+
+                            move_list = [(q, r) for _, q, r in moves]
+                            result_val = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
+                            if not orca_first:
+                                result_val = -result_val
+                            orca_result = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
+                            self.observer.on_game_complete(
+                                game_idx=i + 1, total_games=n_ramora,
+                                move_history=move_list, result=result_val,
+                                num_samples=len(_samples),
+                                analysis_data=None,
+                                game_type='vs_ramora',
+                                orca_result=orca_result)
+
+                        seal_result[0] = {'wins': _wins, 'losses': _losses,
+                                         'draws': _draws, 'samples': _samples}
+                        print(f"  |  SealBot done: {n_ramora} games, "
+                              f"{_wins}W/{_losses}L/{_draws}D, {len(_samples)} samples "
+                              f"({time.perf_counter() - t_ramora_start:.0f}s)")
+                    except Exception as e:
+                        print(f"  |  SealBot thread error: {e}")
+                        import traceback; traceback.print_exc()
+                        seal_result[0] = {'wins': 0, 'losses': 0, 'draws': 0, 'samples': []}
+
+                seal_thread = threading.Thread(target=_seal_worker, daemon=True)
+                seal_thread.start()
+
+            # GPU training runs while SealBot plays in background
             if len(replay_buffer) >= BATCH_SIZE:
                 print(f"  |  Training: {actual_steps} steps on {self.device} "
                       f"(batch={BATCH_SIZE}, buffer={len(replay_buffer)})...")
@@ -907,24 +992,21 @@ class OrcaTrainer:
                 print(f"  |  Training skipped: buffer too small "
                       f"({len(replay_buffer)}<{BATCH_SIZE})")
 
-            # -- Play SealBot games (uses updated network) --------------------
-            t_ramora_start = time.perf_counter()
-            if n_ramora > 0:
-                try:
-                    from orca.config import RAMORA_TIME_LIMIT
-                    ramora_results = self._play_vs_ramora_batch(
-                        n_ramora, current_sims, replay_buffer, collected_samples)
-                    total_samples += ramora_results.get('samples', 0)
-                    r_w, r_l = ramora_results.get('wins', 0), ramora_results.get('losses', 0)
+            # Wait for SealBot thread to finish
+            if seal_thread is not None:
+                seal_thread.join(timeout=600)  # 10 min max
+                sr = seal_result[0]
+                if sr:
+                    for s in sr['samples']:
+                        replay_buffer.push(s)
+                        collected_samples.append(s)
+                    total_samples += len(sr['samples'])
                     self.metrics.setdefault('ramora_wins', 0)
                     self.metrics.setdefault('ramora_losses', 0)
                     self.metrics.setdefault('ramora_draws', 0)
-                    self.metrics['ramora_wins'] += r_w
-                    self.metrics['ramora_losses'] += r_l
-                    self.metrics['ramora_draws'] += ramora_results.get('draws', 0)
-                except Exception as e:
-                    print(f"  |  SealBot games skipped: {e}")
-                    import traceback; traceback.print_exc()
+                    self.metrics['ramora_wins'] += sr['wins']
+                    self.metrics['ramora_losses'] += sr['losses']
+                    self.metrics['ramora_draws'] += sr['draws']
             self._last_ramora_time = time.perf_counter() - t_ramora_start
 
             # -- Self-play (small batch, parallel workers) --------------------
