@@ -65,13 +65,13 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
     ramora_game = HexGame()
     orca_game = CGameState(max_total_stones=max_moves)
     move_history = []
+    orca_policies = []  # MCTS distributions for Orca's moves
     total_stones = 0
 
     while not ramora_game.game_over and total_stones < max_moves:
         is_orca_turn = (ramora_game.current_player == Player.A) == orca_plays_first
 
         if is_orca_turn:
-            # Orca plays one stone at a time
             stones_to_play = ramora_game.moves_left_in_turn
             for _ in range(stones_to_play):
                 if ramora_game.game_over or orca_game.is_terminal:
@@ -79,16 +79,15 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
                 policy = orca_search.search(orca_game, temperature=0.1, add_noise=False)
                 if not policy:
                     break
-                # Pick best move
                 best_move = max(policy, key=policy.get)
                 q, r = best_move
 
                 ramora_game.make_move(q, r)
                 orca_game.place_stone(q, r)
                 move_history.append(('orca', q, r))
+                orca_policies.append(policy)  # store full MCTS distribution
                 total_stones += 1
         else:
-            # Ramora plays (returns pair of moves)
             result = ramora_bot.get_move(ramora_game)
             if not result:
                 break
@@ -101,7 +100,6 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
                 move_history.append(('ramora', q, r))
                 total_stones += 1
 
-    # Determine winner
     if ramora_game.winner == Player.NONE:
         winner = 'draw'
     elif (ramora_game.winner == Player.A) == orca_plays_first:
@@ -114,6 +112,7 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
         'moves': move_history,
         'num_moves': total_stones,
         'ramora_depth': ramora_bot.last_depth,
+        'orca_policies': orca_policies,
     }
 
 

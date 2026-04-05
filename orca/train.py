@@ -883,85 +883,31 @@ class OrcaTrainer:
             train_time = 0
             actual_steps = auto_tuner.params.get("train_steps", self.train_steps)
 
-            # Start SealBot games in background thread (uses net copy on CPU)
+            # Start SealBot games in background thread
+            # Uses a cloned network so training can run simultaneously
             t_ramora_start = time.perf_counter()
             seal_thread = None
-            seal_result = [None]  # mutable container for thread result
+            seal_result = [None]
             if n_ramora > 0:
-                # Clone network for SealBot games (doesn't interfere with training)
                 seal_net = create_network(self.net_config)
                 seal_net.load_state_dict(self.net.state_dict())
                 seal_net.to(self.device)
                 seal_net.eval()
 
+                # Save/restore self.net so _play_vs_ramora_batch uses the clone
+                _orig_net = self.net
                 def _seal_worker():
                     try:
-                        from orca.config import RAMORA_TIME_LIMIT
-                        from orca.search import BatchedMCTS
-                        seal_mcts = BatchedMCTS(seal_net, num_simulations=min(current_sims, 50), batch_size=64)
-                        from opponents.ramora.adapter import create_ramora_bot, play_match
-                        ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
-                        print(f"  |  SealBot games: {n_ramora} games starting in background...")
-
-                        _wins = _losses = _draws = 0
-                        _samples = []
-                        from orca.encoding import CGameState, c_encode_state
-                        from orca.data import TrainingSample
-                        import numpy as np
-
-                        for i in range(n_ramora):
-                            if self.observer.should_stop():
-                                break
-                            orca_first = (i % 2 == 0)
-                            result = play_match(seal_mcts, seal_net, ramora, orca_plays_first=orca_first)
-
-                            game = CGameState(max_total_stones=200)
-                            moves = result['moves']
-                            for idx, (who, q, r) in enumerate(moves):
-                                if who == 'orca':
-                                    enc, oq, orr = c_encode_state(game)
-                                    policy_target = np.zeros(19 * 19, dtype=np.float32)
-                                    iq, ir = q - oq, r - orr
-                                    if 0 <= iq < 19 and 0 <= ir < 19:
-                                        policy_target[iq * 19 + ir] = 1.0
-                                    game_result = 1.0 if result['winner'] == 'orca' else -1.0
-                                    s = TrainingSample(
-                                        encoded_state=enc,
-                                        policy_target=policy_target,
-                                        player=game.current_player,
-                                        result=game_result,
-                                        priority=2.0,
-                                    )
-                                    _samples.append(s)
-                                game.place_stone(q, r)
-
-                            w = result['winner']
-                            if w == 'orca': _wins += 1
-                            elif w == 'ramora': _losses += 1
-                            else: _draws += 1
-
-                            move_list = [(q, r) for _, q, r in moves]
-                            result_val = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
-                            if not orca_first:
-                                result_val = -result_val
-                            orca_result = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
-                            self.observer.on_game_complete(
-                                game_idx=i + 1, total_games=n_ramora,
-                                move_history=move_list, result=result_val,
-                                num_samples=len(_samples),
-                                analysis_data=None,
-                                game_type='vs_ramora',
-                                orca_result=orca_result)
-
-                        seal_result[0] = {'wins': _wins, 'losses': _losses,
-                                         'draws': _draws, 'samples': _samples}
-                        print(f"  |  SealBot done: {n_ramora} games, "
-                              f"{_wins}W/{_losses}L/{_draws}D, {len(_samples)} samples "
-                              f"({time.perf_counter() - t_ramora_start:.0f}s)")
+                        self.net = seal_net
+                        result = self._play_vs_ramora_batch(
+                            n_ramora, current_sims, replay_buffer, collected_samples)
+                        seal_result[0] = result
                     except Exception as e:
                         print(f"  |  SealBot thread error: {e}")
                         import traceback; traceback.print_exc()
-                        seal_result[0] = {'wins': 0, 'losses': 0, 'draws': 0, 'samples': []}
+                        seal_result[0] = {'wins': 0, 'losses': 0, 'draws': 0, 'samples': 0}
+                    finally:
+                        self.net = _orig_net
 
                 seal_thread = threading.Thread(target=_seal_worker, daemon=True)
                 seal_thread.start()
@@ -994,19 +940,17 @@ class OrcaTrainer:
 
             # Wait for SealBot thread to finish
             if seal_thread is not None:
-                seal_thread.join(timeout=600)  # 10 min max
+                seal_thread.join(timeout=900)  # 15 min max
                 sr = seal_result[0]
                 if sr:
-                    for s in sr['samples']:
-                        replay_buffer.push(s)
-                        collected_samples.append(s)
-                    total_samples += len(sr['samples'])
+                    # Samples already pushed to replay_buffer by _play_vs_ramora_batch
+                    total_samples += sr.get('samples', 0)
                     self.metrics.setdefault('ramora_wins', 0)
                     self.metrics.setdefault('ramora_losses', 0)
                     self.metrics.setdefault('ramora_draws', 0)
-                    self.metrics['ramora_wins'] += sr['wins']
-                    self.metrics['ramora_losses'] += sr['losses']
-                    self.metrics['ramora_draws'] += sr['draws']
+                    self.metrics['ramora_wins'] += sr.get('wins', 0)
+                    self.metrics['ramora_losses'] += sr.get('losses', 0)
+                    self.metrics['ramora_draws'] += sr.get('draws', 0)
             self._last_ramora_time = time.perf_counter() - t_ramora_start
 
             # -- Self-play (small batch, parallel workers) --------------------
@@ -1318,18 +1262,25 @@ class OrcaTrainer:
     def _play_vs_ramora_batch(self, n_games: int, current_sims: int,
                               replay_buffer: ReplayBuffer,
                               collected_samples: list) -> dict:
-        """Play games against Ramora's MinimaxBot and collect training samples.
+        """Play games against SealBot and collect rich training samples.
 
-        Returns dict with wins, losses, draws, samples count.
-        Emits game_complete events with game_type='vs_ramora' for dashboard.
+        Collects samples from BOTH players:
+        - Orca moves: soft MCTS distribution as policy target
+        - SealBot moves: expert demonstration (one-hot, lower priority)
+
+        Uses temporal value decay so the value head learns which positions
+        are more dangerous (not flat -1.0 for every position in a loss).
         """
         from opponents.ramora.adapter import create_ramora_bot, play_match
-        from orca.config import RAMORA_TIME_LIMIT
+        from orca.config import RAMORA_TIME_LIMIT, BLOCKING_PRIORITY_BOOST
         from orca.search import BatchedMCTS
+        from orca.encoding import CGameState, c_encode_state, c_compute_threat_label
+        from orca.data import TrainingSample
+        import numpy as np
 
         self.net.eval()
-        # Use fewer sims for SealBot games (Orca loses anyway, learning from the loss)
-        seal_sims = min(current_sims, 50)
+        # Use full sims — at 50 sims MCTS is blind (2 plies), producing garbage data
+        seal_sims = current_sims
         mcts = BatchedMCTS(self.net, num_simulations=seal_sims, batch_size=64)
         ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
         print(f"  |  SealBot games: {n_games} games, {seal_sims} sims, "
@@ -1338,6 +1289,7 @@ class OrcaTrainer:
         wins = losses = draws = 0
         total_samp = 0
         t0 = time.perf_counter()
+        GAMMA = 0.97  # temporal value decay
 
         for i in range(n_games):
             if self.observer.should_stop():
@@ -1345,35 +1297,112 @@ class OrcaTrainer:
             orca_first = (i % 2 == 0)
             result = play_match(mcts, self.net, ramora, orca_plays_first=orca_first)
 
-            # Collect training samples from the game
-            # Encode each position from Orca's moves for training
-            from orca.encoding import CGameState, c_encode_state
-            from orca.data import TrainingSample
-            import numpy as np
-
             game = CGameState(max_total_stones=200)
             moves = result['moves']
+            orca_policies = result.get('orca_policies', [])
+            orca_policy_idx = 0
+            n_moves = len(moves)
+
+            # Base game result
+            orca_won = result['winner'] == 'orca'
+            base_orca_result = 1.0 if orca_won else (-1.0 if result['winner'] == 'ramora' else 0.0)
+
             samples = []
             for idx, (who, q, r) in enumerate(moves):
+                enc, oq, orr = c_encode_state(game)
+                threat = c_compute_threat_label(game)
+
+                # Temporal value decay: positions far from end get weaker signal
+                distance_from_end = n_moves - idx
+                decay = GAMMA ** distance_from_end
+
                 if who == 'orca':
-                    # Encode state before this move for training
-                    enc, oq, orr = c_encode_state(game)
+                    # --- Orca's move: use MCTS distribution as soft policy target ---
                     policy_target = np.zeros(19 * 19, dtype=np.float32)
-                    iq, ir = q - oq, r - orr
-                    if 0 <= iq < 19 and 0 <= ir < 19:
-                        policy_target[iq * 19 + ir] = 1.0
-                    game_result = 1.0 if result['winner'] == 'orca' else -1.0
+                    if orca_policy_idx < len(orca_policies) and orca_policies[orca_policy_idx]:
+                        # Soft target from MCTS search distribution
+                        for (mq, mr), prob in orca_policies[orca_policy_idx].items():
+                            mi, mj = mq - oq, mr - orr
+                            if 0 <= mi < 19 and 0 <= mj < 19:
+                                policy_target[mi * 19 + mj] = prob
+                        s = policy_target.sum()
+                        if s > 1e-6:
+                            policy_target /= s
+                        else:
+                            # Fallback to one-hot
+                            iq, ir = q - oq, r - orr
+                            if 0 <= iq < 19 and 0 <= ir < 19:
+                                policy_target[iq * 19 + ir] = 1.0
+                    else:
+                        # No MCTS policy available, use one-hot
+                        iq, ir = q - oq, r - orr
+                        if 0 <= iq < 19 and 0 <= ir < 19:
+                            policy_target[iq * 19 + ir] = 1.0
+                    orca_policy_idx += 1
+
+                    # Recency-weighted priority (late game matters more)
+                    recency = (idx + 1) / max(n_moves, 1)
+                    priority = 1.0 + 2.0 * recency  # 1.0 early → 3.0 late
+
                     s = TrainingSample(
                         encoded_state=enc,
                         policy_target=policy_target,
                         player=game.current_player,
-                        result=game_result,
-                        priority=2.0,  # boost vs-opponent samples
+                        result=base_orca_result * decay,
+                        threat_label=threat,
+                        priority=priority,
                     )
                     samples.append(s)
                     replay_buffer.push(s)
                     collected_samples.append(s)
+
+                else:
+                    # --- SealBot's move: expert demonstration ---
+                    policy_target = np.zeros(19 * 19, dtype=np.float32)
+                    iq, ir = q - oq, r - orr
+                    if 0 <= iq < 19 and 0 <= ir < 19:
+                        policy_target[iq * 19 + ir] = 1.0
+
+                    # Result from SealBot's perspective (inverted)
+                    seal_result = -base_orca_result * decay
+
+                    s = TrainingSample(
+                        encoded_state=enc,
+                        policy_target=policy_target,
+                        player=game.current_player,
+                        result=seal_result,
+                        threat_label=threat,
+                        priority=1.5,  # lower than Orca MCTS samples
+                    )
+                    samples.append(s)
+                    replay_buffer.push(s)
+                    collected_samples.append(s)
+
                 game.place_stone(q, r)
+
+            # --- Hindsight priority boost: find critical blocking moments ---
+            try:
+                game2 = CGameState(max_total_stones=200)
+                prev_orca_sample_idx = None
+                for idx, (who, q, r) in enumerate(moves):
+                    if who == 'orca':
+                        prev_orca_sample_idx = idx
+                    elif who == 'ramora' and prev_orca_sample_idx is not None:
+                        # After SealBot moves, check if it created threats
+                        game2.place_stone(q, r)
+                        seal_player = game2._lib.board_get_current_player(game2._ptr)
+                        # Check threats BEFORE this move (seal's move created them)
+                        wm = game2._lib.board_count_winning_moves(
+                            game2._ptr, 1 - seal_player)
+                        if wm >= 2:
+                            # SealBot created 2+ threats — preceding Orca move was critical
+                            for s in samples:
+                                if hasattr(s, '_move_idx') and s._move_idx == prev_orca_sample_idx:
+                                    s.priority = max(s.priority, BLOCKING_PRIORITY_BOOST)
+                        continue
+                    game2.place_stone(q, r)
+            except Exception:
+                pass  # hindsight boost is optional
 
             total_samp += len(samples)
             w = result['winner']
@@ -1381,29 +1410,25 @@ class OrcaTrainer:
             elif w == 'ramora': losses += 1
             else: draws += 1
 
-            # Emit game_complete with game_type for dashboard coloring
-            # For vs_ramora: result is always from P0 perspective (standard)
-            # orca_result is from Orca's perspective (for Ramora stats tracking)
+            # Emit for dashboard
             move_list = [(q, r) for _, q, r in moves]
-            # P0 perspective: who won as P0?
             if w == 'orca':
                 result_val = 1.0 if orca_first else -1.0
             elif w == 'ramora':
                 result_val = -1.0 if orca_first else 1.0
             else:
                 result_val = 0.0
-            # Orca perspective (for Ramora winrate display)
-            orca_result = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
+            orca_result_val = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
             self.observer.on_game_complete(
                 game_idx=i + 1, total_games=n_games,
                 move_history=move_list, result=result_val,
                 num_samples=len(samples),
                 analysis_data=None,
                 game_type='vs_ramora',
-                orca_result=orca_result)
+                orca_result=orca_result_val)
 
         elapsed = time.perf_counter() - t0
-        print(f"  |  Ramora games: {n_games} games, {wins}W/{losses}L/{draws}D, "
+        print(f"  |  SealBot done: {n_games} games, {wins}W/{losses}L/{draws}D, "
               f"{total_samp} samples ({elapsed:.1f}s)")
         return {'wins': wins, 'losses': losses, 'draws': draws, 'samples': total_samp}
 
