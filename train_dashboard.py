@@ -576,17 +576,20 @@ class DashboardObserver:
     def on_game_complete(self, game_idx: int, total_games: int,
                          move_history: list, result: float,
                          num_samples: int,
-                         analysis_data: list = None) -> None:
+                         analysis_data: list = None,
+                         game_type: str = 'selfplay') -> None:
         data = {
             'game_idx': game_idx,
             'total_games': total_games,
             'result': result,
             'num_moves': len(move_history),
             'moves': move_history,
+            'game_type': game_type,
         }
         if analysis_data:
             data['analysis'] = analysis_data
-        print(f'  │   Emitting game_complete #{game_idx} with {len(move_history)} moves')
+        tag = f' [{game_type}]' if game_type != 'selfplay' else ''
+        print(f'  |  Emitting game_complete #{game_idx} with {len(move_history)} moves{tag}')
         self.sio.emit('game_complete', data)
 
     def on_iteration_complete(self, metrics: dict) -> None:
@@ -1598,6 +1601,8 @@ body.dark #value-chart-wrap{border-color:#333}
   <span class="sep">|</span>
   <span>Win P0:<b id="s-w0">0</b>% P1:<b id="s-w1">0</b>%</span>
   <span class="sep">|</span>
+  <span style="color:#2563eb">vs Ramora: <b id="s-ramora-wr">--</b></span>
+  <span class="sep">|</span>
   <span class="res-bar">CPU <div class="res-meter"><div class="res-meter-fill" id="cpu-fill" style="width:0%"></div></div> <b id="s-cpu">0</b>%</span>
   <span class="res-bar">RAM <div class="res-meter"><div class="res-meter-fill" id="ram-fill" style="width:0%"></div></div> <b id="s-ram">0</b>%</span>
 </footer>
@@ -1742,6 +1747,7 @@ socket.on('disconnect', () => {
 });
 
 let stones0 = [], stones1 = [], moveOrder = [];  // moveOrder[i] = {q, r, num, player}
+let currentGameType = 'selfplay';  // 'selfplay' or 'vs_ramora'
 
 // KaTrain-style analysis overlay state
 let analysisData = null;  // array of {value_estimate, top_moves, threat_count} per move
@@ -1991,7 +1997,11 @@ function drawHex() {
     }
   }
 
-  // P1: white hexagons with hatching
+  // P1: white hexagons with hatching (blue fill for vs_ramora games)
+  const isRamoraGame = currentGameType === 'vs_ramora';
+  const p1Fill = isRamoraGame ? '#2563eb' : '#fff';       // blue vs white
+  const p1Stroke = isRamoraGame ? '#1d4ed8' : '#000';     // dark blue vs black
+  const p1Hatch = isRamoraGame ? '#93c5fd' : '#000';      // light blue vs black
   for (const [q, r] of stones1) {
     const [sx, sy] = toS(q, r);
     const key = q + ',' + r;
@@ -1999,18 +2009,18 @@ function drawHex() {
     // Quality overlay: tint the fill color
     const qual = qualityMap[key];
     if (qual === 'blunder') {
-      ctx.fillStyle = '#fcc'; ctx.fill();
+      ctx.fillStyle = isRamoraGame ? '#7c3aed' : '#fcc'; ctx.fill();
     } else if (qual === 'good') {
-      ctx.fillStyle = '#cfc'; ctx.fill();
+      ctx.fillStyle = isRamoraGame ? '#34d399' : '#cfc'; ctx.fill();
     } else {
-      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.fillStyle = p1Fill; ctx.fill();
     }
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.strokeStyle = p1Stroke; ctx.lineWidth = 1.2; ctx.stroke();
     // Hatching (skip if quality-colored for clarity)
     if (!qual || qual === 'neutral') {
       ctx.save();
       hexPath(sx, sy, hr); ctx.clip();
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 0.6;
+      ctx.strokeStyle = p1Hatch; ctx.lineWidth = 0.6;
       const step = Math.max(3, 4 * sc);
       for (let d = -hr * 2; d <= hr * 2; d += step) {
         ctx.beginPath();
@@ -2121,13 +2131,15 @@ function replayGame(d) {
   currentGameData = d;
   replayMoveIdx = 0;
   stones0 = []; stones1 = []; moveOrder = [];
+  currentGameType = d.game_type || 'selfplay';
   // Set analysis data (may be null if not available)
   analysisData = d._analysis || d.analysis || null;
   const vcw = el('value-chart-wrap');
   if (vcw) vcw.style.display = (overlayMode.value && analysisData) ? '' : 'none';
   drawHex();
-  el('game-num').textContent = d.game_idx;
-  setInfo('Game #' + d.game_idx + ' playing... (' + d.moves.length + ' moves)');
+  const typeLabel = currentGameType === 'vs_ramora' ? ' [vs Ramora]' : '';
+  el('game-num').textContent = d.game_idx + typeLabel;
+  setInfo('Game #' + d.game_idx + typeLabel + ' playing... (' + d.moves.length + ' moves)');
   if (replayTimer) clearInterval(replayTimer);
   replayTimer = setInterval(replayAdvance, settings.replaySpeed);
 }
@@ -2206,7 +2218,9 @@ function addToHistory(d) {
     const span = document.createElement('span');
     span.className = 'gh-item' + (g === currentGameData ? ' active' : '');
     const w = g.result > 0 ? 'B' : 'W';
-    span.textContent = '#' + g.game_idx + ' ' + w + ' ' + g.num_moves + 'mv';
+    const tag = g.game_type === 'vs_ramora' ? 'R' : '';
+    span.textContent = '#' + g.game_idx + tag + ' ' + w + ' ' + g.num_moves + 'mv';
+    if (g.game_type === 'vs_ramora') span.style.color = '#2563eb';
     span.onclick = () => { replayPaused = false; replayGame(g); };
     histEl.appendChild(span);
   });
@@ -2226,7 +2240,8 @@ socket.on('game_complete', d => {
       const pf = el('progress-fill');
       if (pf) pf.style.width = Math.round(d.game_idx / d.total_games * 100) + '%';
       const plab = el('progress-label');
-      if (plab) plab.textContent = 'Self-play ' + d.game_idx + '/' + d.total_games;
+      const plabel = d.game_type === 'vs_ramora' ? 'vs Ramora ' : 'Self-play ';
+      if (plab) plab.textContent = plabel + d.game_idx + '/' + d.total_games;
     }
     // Stats
     gameStats.count++;
@@ -2236,6 +2251,16 @@ socket.on('game_complete', d => {
     const lsL = el('ls-len'); if (lsL && gameStats.count) lsL.textContent = Math.round(gameStats.totalLen / gameStats.count);
     const lsW0 = el('ls-w0'); if (lsW0 && gameStats.count) lsW0.textContent = Math.round(gameStats.w0 / gameStats.count * 100) + '%';
     const lsW1 = el('ls-w1'); if (lsW1 && gameStats.count) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
+    // Track Ramora stats
+    if (d.game_type === 'vs_ramora') {
+      if (!window._ramoraStats) window._ramoraStats = {w:0, l:0, d:0};
+      if (d.result > 0) window._ramoraStats.w++;
+      else if (d.result < 0) window._ramoraStats.l++;
+      else window._ramoraStats.d++;
+      const rs = window._ramoraStats;
+      const rn = rs.w + rs.l + rs.d;
+      el('s-ramora-wr').textContent = rs.w + 'W/' + rs.l + 'L' + (rs.d ? '/' + rs.d + 'D' : '') + ' (' + Math.round(rs.w/rn*100) + '%)';
+    }
     // History + replay (NEVER interrupt a playing game)
     if (d.moves && d.moves.length) {
       // Store analysis data if present

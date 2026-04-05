@@ -88,6 +88,8 @@ SURVIVAL_PRIORITY_BOOST = 3.0    # priority for surviving an opponent threat tur
 USE_AB_HYBRID = True             # set False to disable AB pre-check in MCTS
 AB_HYBRID_DEPTH = 4              # depth of AB pre-check (0 = disable)
 THREAT_POLICY_BLEND = 0.5        # blend threat spatial map into policy logits (0 = disabled)
+RAMORA_GAME_FRACTION = 0.15      # fraction of games played vs Ramora MinimaxBot
+RAMORA_TIME_LIMIT = 0.5          # seconds per move for Ramora
 
 # ---------------------------------------------------------------------------
 # Mixed precision (CUDA only - MPS FP16 is unreliable)

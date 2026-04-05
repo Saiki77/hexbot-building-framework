@@ -78,10 +78,12 @@ class PrintObserver:
     def on_game_complete(self, game_idx: int, total_games: int,
                          move_history: list, result: float,
                          num_samples: int,
-                         analysis_data: list = None) -> None:
+                         analysis_data: list = None,
+                         game_type: str = 'selfplay') -> None:
         winner = "P0" if result > 0 else ("P1" if result < 0 else "draw")
+        tag = f" [{game_type}]" if game_type != 'selfplay' else ""
         print(f"  |  Game {game_idx}/{total_games}: {winner} "
-              f"in {len(move_history)} moves ({num_samples} samples)")
+              f"in {len(move_history)} moves ({num_samples} samples){tag}")
 
     def on_iteration_complete(self, metrics: dict) -> None:
         loss = metrics.get("loss", {})
@@ -391,6 +393,15 @@ class GenerationalArena:
             matchups["vs_heuristic"] = {"w": w_heur, "l": l_heur, "d": 0}
             total_wins += w_heur; total_losses += l_heur
 
+        # 4. Play against Ramora MinimaxBot (anchored at ~1200 ELO)
+        w_ramora = l_ramora = 0
+        try:
+            w_ramora, l_ramora = self._play_vs_ramora(mcts_cur)
+            matchups["vs_ramora"] = {"w": w_ramora, "l": l_ramora, "d": 0}
+            total_wins += w_ramora; total_losses += l_ramora
+        except Exception as e:
+            print(f"  |  Ramora eval skipped: {e}")
+
         self.matchup_history.append(matchups)
 
         # Compute ELO from combined results
@@ -410,8 +421,14 @@ class GenerationalArena:
             heur_wr = max(0.05, min(0.95, heur_wr))
             rand_elo = 500 + 400 * math.log10(rand_wr / (1 - rand_wr))
             heur_elo = 1000 + 400 * math.log10(heur_wr / (1 - heur_wr))
-            # Blend: 60% generational + 20% random-anchored + 20% heuristic-anchored
-            new_elo = 0.6 * gen_elo + 0.2 * rand_elo + 0.2 * heur_elo
+
+            if w_ramora + l_ramora > 0:
+                ramora_wr = w_ramora / max(w_ramora + l_ramora, 1)
+                ramora_wr = max(0.05, min(0.95, ramora_wr))
+                ramora_elo = 1200 + 400 * math.log10(ramora_wr / (1 - ramora_wr))
+                new_elo = 0.5 * gen_elo + 0.15 * rand_elo + 0.15 * heur_elo + 0.2 * ramora_elo
+            else:
+                new_elo = 0.6 * gen_elo + 0.2 * rand_elo + 0.2 * heur_elo
         else:
             new_elo = gen_elo
 
@@ -453,6 +470,19 @@ class GenerationalArena:
                 result = -result
             if result > 0: wins += 1
             elif result < 0: losses += 1
+        return wins, losses
+
+    def _play_vs_ramora(self, mcts_cur):
+        """Play against Ramora's MinimaxBot. Returns (wins, losses)."""
+        from opponents.ramora.adapter import play_match, create_ramora_bot
+        from orca.config import RAMORA_TIME_LIMIT
+        ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
+        wins = losses = 0
+        for g in range(self.baseline_games):
+            orca_first = (g % 2 == 0)
+            result = play_match(mcts_cur, None, ramora, orca_plays_first=orca_first)
+            if result['winner'] == 'orca': wins += 1
+            elif result['winner'] == 'ramora': losses += 1
         return wins, losses
 
     def _select_opponents(self, n: int) -> list:
@@ -854,6 +884,23 @@ class OrcaTrainer:
                   f"({gps:.1f} games/s)")
             print(f"  |  Wins: P0={wins[0]} P1={wins[1]} draw={wins[2]}")
 
+            # Play games vs Ramora MinimaxBot (15% of iteration)
+            try:
+                from orca.config import RAMORA_GAME_FRACTION, RAMORA_TIME_LIMIT
+                n_ramora = max(1, int(current_games * RAMORA_GAME_FRACTION))
+                ramora_results = self._play_vs_ramora_batch(
+                    n_ramora, current_sims, replay_buffer, collected_samples)
+                total_samples += ramora_results.get('samples', 0)
+                r_w, r_l = ramora_results.get('wins', 0), ramora_results.get('losses', 0)
+                self.metrics.setdefault('ramora_wins', 0)
+                self.metrics.setdefault('ramora_losses', 0)
+                self.metrics.setdefault('ramora_draws', 0)
+                self.metrics['ramora_wins'] += r_w
+                self.metrics['ramora_losses'] += r_l
+                self.metrics['ramora_draws'] += ramora_results.get('draws', 0)
+            except Exception as e:
+                print(f"  |  Ramora games skipped: {e}")
+
             # Load online games
             self._load_online_games(replay_buffer, collected_samples)
 
@@ -980,6 +1027,9 @@ class OrcaTrainer:
                 "workers": self.num_workers,
                 "sims": current_sims,
                 "lr": round(optimizer.param_groups[0]["lr"], 5),
+                "ramora_wins": self.metrics.get("ramora_wins", 0),
+                "ramora_losses": self.metrics.get("ramora_losses", 0),
+                "ramora_draws": self.metrics.get("ramora_draws", 0),
             }
             self.metrics["iterations"].append(iter_metrics)
             self.metrics["total_games"] = self.metrics.get("total_games", 0) + game_idx
@@ -1135,6 +1185,85 @@ class OrcaTrainer:
                 print(f"  |  Online games: +{len(online_samples)} samples")
         except Exception:
             pass
+
+    def _play_vs_ramora_batch(self, n_games: int, current_sims: int,
+                              replay_buffer: ReplayBuffer,
+                              collected_samples: list) -> dict:
+        """Play games against Ramora's MinimaxBot and collect training samples.
+
+        Returns dict with wins, losses, draws, samples count.
+        Emits game_complete events with game_type='vs_ramora' for dashboard.
+        """
+        from opponents.ramora.adapter import create_ramora_bot, play_match
+        from orca.config import RAMORA_TIME_LIMIT
+        from orca.search import BatchedMCTS
+
+        self.net.eval()
+        mcts = BatchedMCTS(self.net, num_simulations=current_sims, batch_size=64)
+        ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
+
+        wins = losses = draws = 0
+        total_samp = 0
+        t0 = time.perf_counter()
+
+        for i in range(n_games):
+            if self.observer.should_stop():
+                break
+            orca_first = (i % 2 == 0)
+            result = play_match(mcts, self.net, ramora, orca_plays_first=orca_first)
+
+            # Collect training samples from the game
+            # Encode each position from Orca's moves for training
+            from orca.encoding import CGameState, c_encode_state
+            from orca.data import TrainingSample
+            import numpy as np
+
+            game = CGameState(max_total_stones=200)
+            moves = result['moves']
+            samples = []
+            for idx, (who, q, r) in enumerate(moves):
+                if who == 'orca':
+                    # Encode state before this move for training
+                    enc, oq, orr = c_encode_state(game)
+                    policy_target = np.zeros(19 * 19, dtype=np.float32)
+                    iq, ir = q - oq, r - orr
+                    if 0 <= iq < 19 and 0 <= ir < 19:
+                        policy_target[iq * 19 + ir] = 1.0
+                    game_result = 1.0 if result['winner'] == 'orca' else -1.0
+                    s = TrainingSample(
+                        encoded_state=enc,
+                        policy_target=policy_target,
+                        player=game.current_player,
+                        result=game_result,
+                        priority=2.0,  # boost vs-opponent samples
+                    )
+                    samples.append(s)
+                    replay_buffer.push(s)
+                    collected_samples.append(s)
+                game.place_stone(q, r)
+
+            total_samp += len(samples)
+            w = result['winner']
+            if w == 'orca': wins += 1
+            elif w == 'ramora': losses += 1
+            else: draws += 1
+
+            # Emit game_complete with game_type for dashboard coloring
+            move_list = [(q, r) for _, q, r in moves]
+            result_val = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
+            if not orca_first:
+                result_val = -result_val  # flip for P0/P1 perspective
+            self.observer.on_game_complete(
+                game_idx=i + 1, total_games=n_games,
+                move_history=move_list, result=result_val,
+                num_samples=len(samples),
+                analysis_data=None,
+                game_type='vs_ramora')
+
+        elapsed = time.perf_counter() - t0
+        print(f"  |  Ramora games: {n_games} games, {wins}W/{losses}L/{draws}D, "
+              f"{total_samp} samples ({elapsed:.1f}s)")
+        return {'wins': wins, 'losses': losses, 'draws': draws, 'samples': total_samp}
 
     def _build_position_mix(self, current_games: int,
                             params: dict) -> list:
