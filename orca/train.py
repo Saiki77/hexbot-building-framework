@@ -1289,7 +1289,7 @@ class OrcaTrainer:
         wins = losses = draws = 0
         total_samp = 0
         t0 = time.perf_counter()
-        GAMMA = 0.97  # temporal value decay
+        GAMMA = 0.99  # gentle temporal value decay (0.97 was too aggressive)
 
         for i in range(n_games):
             if self.observer.should_stop():
@@ -1348,7 +1348,7 @@ class OrcaTrainer:
                         encoded_state=enc,
                         policy_target=policy_target,
                         player=game.current_player,
-                        result=base_orca_result * decay,
+                        result=max(-1.0, min(1.0, base_orca_result * decay)),
                         threat_label=threat,
                         priority=priority,
                     )
@@ -1364,7 +1364,8 @@ class OrcaTrainer:
                         policy_target[iq * 19 + ir] = 1.0
 
                     # Result from SealBot's perspective (inverted)
-                    seal_result = -base_orca_result * decay
+                    # Clamp to [-1, 1] for stability
+                    seal_result = max(-1.0, min(1.0, -base_orca_result * decay))
 
                     s = TrainingSample(
                         encoded_state=enc,
@@ -1372,7 +1373,7 @@ class OrcaTrainer:
                         player=game.current_player,
                         result=seal_result,
                         threat_label=threat,
-                        priority=1.5,  # lower than Orca MCTS samples
+                        priority=1.0,  # low priority — bootstrapping only
                     )
                     samples.append(s)
                     replay_buffer.push(s)
