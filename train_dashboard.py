@@ -1478,7 +1478,7 @@ body.dark #value-chart-wrap{border-color:#333}
 <body>
 <header>
   <span class="title">Hex Bot Training</span>
-  <button id="btn-start" onclick="startTraining()" style="background:#000;color:#fff;border:none;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9654;</button><button id="btn-stop" onclick="stopTraining()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9632;</button><button onclick="showPlayMenu()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer;margin-left:8px">PLAY</button><span class="status" id="status">IDLE</span>
+  <button id="btn-start" onclick="startTraining()" style="background:#000;color:#fff;border:none;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9654;</button><button id="btn-stop" onclick="stopTraining()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9632;</button><span class="status" id="status">IDLE</span>
   <span class="conn-dot" id="conn-dot" style="background:#ccc" title="Disconnected"></span>
 
 </header>
@@ -1526,6 +1526,7 @@ body.dark #value-chart-wrap{border-color:#333}
     <div class="tab-bar">
       <span class="tab active" data-tab="charts" onclick="switchTab('charts')">Charts</span>
       <span class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</span>
+      <span class="tab" data-tab="play" onclick="switchTab('play')">Play</span>
     </div>
     <div id="tab-charts" class="tab-content" style="display:flex;flex-direction:column;overflow-y:auto;flex:1">
       <div class="chart-box" id="box-elo">
@@ -1735,6 +1736,28 @@ body.dark #value-chart-wrap{border-color:#333}
           <div class="cfg-row"><label title="Turn everything black except one button to undo">Lights out</label><button onclick="lightsOut()" style="font:bold 10px 'SF Mono',monospace;padding:3px 10px;border:1px solid #000;background:#000;color:#fff;cursor:pointer">LIGHTS OUT</button></div>
         </div>
       </div>
+    </div>
+    <div id="tab-play" class="tab-content" style="display:none;overflow-y:auto;flex:1;padding:16px 20px">
+      <div style="font:bold 12px 'SF Mono',monospace;letter-spacing:2px;margin-bottom:16px;text-transform:uppercase">Play a Game</div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
+        <button onclick="startPlay('orca',true)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #000;background:#000;color:#fff;cursor:pointer;text-align:left">
+          vs Orca (you play first)
+        </button>
+        <button onclick="startPlay('orca',false)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #000;background:#fff;color:#000;cursor:pointer;text-align:left">
+          vs Orca (Orca plays first)
+        </button>
+        <button onclick="startPlay('sealbot',true)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #2563eb;background:#2563eb;color:#fff;cursor:pointer;text-align:left">
+          vs SealBot (you play first)
+        </button>
+        <button onclick="startPlay('sealbot',false)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #2563eb;background:#fff;color:#2563eb;cursor:pointer;text-align:left">
+          vs SealBot (SealBot plays first)
+        </button>
+      </div>
+      <div id="play-info" style="font:11px 'SF Mono',monospace;color:#666;min-height:24px;margin-bottom:8px"></div>
+      <div id="play-board" style="position:relative;width:100%;height:300px;border:1px solid #eee">
+        <canvas id="play-canvas" style="width:100%;height:100%"></canvas>
+      </div>
+      <div id="play-moves" style="font:9px 'SF Mono',monospace;margin-top:8px;max-height:80px;overflow-y:auto;color:#666"></div>
     </div>
   </div>
 </main>
@@ -2691,108 +2714,170 @@ function toggleDarkMode(on) {
 }
 
 // --- Lights out: black screen with minimal status ---
-// --- Interactive Play ---
+// --- Interactive Play (in Play tab) ---
 let playSession = null;
-let playClickHandler = null;
+let playStones0 = [], playStones1 = [], playMoveOrder = [];
 
-function showPlayMenu() {
-  el('play-overlay').style.display = 'flex';
-  el('play-status').textContent = '';
-}
-function hidePlayMenu() {
-  el('play-overlay').style.display = 'none';
-  if (playClickHandler) {
-    el('hex-canvas').removeEventListener('click', playClickHandler);
-    playClickHandler = null;
-  }
-  playSession = null;
-}
 function startPlay(opponent, humanFirst) {
-  el('play-status').textContent = 'Starting...';
+  const info = el('play-info');
+  info.textContent = 'Starting game...';
   fetch('/api/play/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({opponent: opponent, human_first: humanFirst})
   }).then(r => r.json()).then(d => {
-    if (d.error) { el('play-status').textContent = d.error; return; }
-    playSession = {id: d.session_id, opponent: opponent, humanFirst: humanFirst};
-    el('play-overlay').style.display = 'none';
+    if (d.error) { info.textContent = 'Error: ' + d.error; return; }
+    playSession = {id: d.session_id, opponent: opponent};
+    playStones0 = []; playStones1 = []; playMoveOrder = [];
 
-    // Reset board for interactive play
-    stones0 = []; stones1 = []; moveOrder = [];
-    currentGameType = opponent === 'sealbot' ? 'vs_ramora' : 'selfplay';
-    replayBusy = false;
-    if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
-
-    // Apply bot's first moves if bot went first
+    // Apply bot's first moves
     if (d.moves) {
-      for (const m of d.moves) applyPlayMove(m.who, m.q, m.r);
+      for (const m of d.moves) playApplyMove(m.who, m.q, m.r);
     }
-    drawHex();
-    setInfo('YOUR TURN — click a hex to place a stone (vs ' + opponent + ')');
-    el('game-num').textContent = 'PLAY vs ' + opponent.toUpperCase();
+    drawPlayBoard();
+    info.textContent = 'YOUR TURN - click the board to place a stone (vs ' + opponent + ')';
+    el('play-moves').textContent = '';
 
-    // Add click handler to canvas
-    const canvas = el('hex-canvas');
-    if (playClickHandler) canvas.removeEventListener('click', playClickHandler);
-    playClickHandler = function(e) { onPlayClick(e); };
-    canvas.addEventListener('click', playClickHandler);
-  }).catch(e => { el('play-status').textContent = 'Error: ' + e; });
+    // Set up click handler on play canvas
+    const cv = el('play-canvas');
+    cv.onclick = function(e) { onPlayCanvasClick(e); };
+  }).catch(e => { info.textContent = 'Error: ' + e; });
 }
 
-function applyPlayMove(who, q, r) {
-  const moveNum = moveOrder.length + 1;
-  // Figure out which player based on move order (same as rebuildBoard)
+function playApplyMove(who, q, r) {
+  const num = playMoveOrder.length + 1;
   let p = 0, stt = 0, need = 1;
-  for (let i = 0; i < moveOrder.length; i++) {
+  for (let i = 0; i < playMoveOrder.length; i++) {
     stt++;
     if (stt >= need) { p = 1 - p; stt = 0; need = 2; }
   }
-  if (p === 0) stones0.push([q, r]); else stones1.push([q, r]);
-  moveOrder.push({q, r, num: moveNum, player: p});
+  if (p === 0) playStones0.push([q, r]); else playStones1.push([q, r]);
+  playMoveOrder.push({q, r, num, player: p, who});
 }
 
-function onPlayClick(e) {
-  if (!playSession) return;
-  const canvas = el('hex-canvas');
-  const rect = canvas.getBoundingClientRect();
+function drawPlayBoard() {
+  const cv = el('play-canvas');
+  if (!cv) return;
   const DPR = window.devicePixelRatio || 1;
-  const cx = (e.clientX - rect.left) * DPR;
-  const cy = (e.clientY - rect.top) * DPR;
+  const rect = cv.parentElement.getBoundingClientRect();
+  const W = Math.round(rect.width), H = Math.round(rect.height);
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
 
-  // Convert pixel to axial coords (reverse of toS in drawHex)
-  // We need the current transform params from the last drawHex call
-  if (!window._lastHexTransform) return;
-  const {ox, oy, sc: hsc} = window._lastHexTransform;
-  const S3 = Math.sqrt(3);
-  const px = (cx / DPR - ox) / hsc;
-  const py = (cy / DPR - oy) / hsc;
-  // Reverse axial-to-pixel: px = HEX_SIZE*(S3*q + S3/2*r), py = HEX_SIZE*(1.5*r)
-  const HEX_SIZE = 20; // matches drawHex
+  const S3 = Math.sqrt(3), HEX_SIZE = 20;
+  function ax2px(q, r) { return [HEX_SIZE * (S3 * q + S3/2 * r), HEX_SIZE * 1.5 * r]; }
+
+  const all = [...playStones0, ...playStones1];
+  if (all.length === 0) {
+    // Draw origin dot
+    const ox = W/2, oy = H/2;
+    ctx.fillStyle = '#ddd'; ctx.beginPath(); ctx.arc(ox, oy, 4, 0, Math.PI*2); ctx.fill();
+    window._playTransform = {ox, oy, sc: 1};
+    return;
+  }
+
+  let mnX=1e9, mxX=-1e9, mnY=1e9, mxY=-1e9;
+  for (const [q,r] of all) {
+    const [px,py] = ax2px(q,r);
+    if(px<mnX)mnX=px; if(px>mxX)mxX=px; if(py<mnY)mnY=py; if(py>mxY)mxY=py;
+  }
+  const mg = HEX_SIZE * 4;
+  const spanX = mxX-mnX+mg*2, spanY = mxY-mnY+mg*2;
+  const sc = Math.min(W/spanX, H/spanY, 3);
+  const ox = W/2 - (mnX+mxX)/2*sc, oy = H/2 - (mnY+mxY)/2*sc;
+  window._playTransform = {ox, oy, sc};
+
+  function toS(q,r) { const [px,py]=ax2px(q,r); return [px*sc+ox, py*sc+oy]; }
+  function hex(cx,cy,sz) {
+    ctx.beginPath();
+    for(let i=0;i<6;i++){const a=Math.PI/3*i-Math.PI/6;i===0?ctx.moveTo(cx+sz*Math.cos(a),cy+sz*Math.sin(a)):ctx.lineTo(cx+sz*Math.cos(a),cy+sz*Math.sin(a));}
+    ctx.closePath();
+  }
+  const hr = HEX_SIZE * 0.85 * sc;
+
+  // Empty grid dots around stones
+  const occ = new Set(all.map(([q,r])=>q+','+r));
+  const drawn = new Set();
+  for (const [q,r] of all) {
+    for (let dq=-2;dq<=2;dq++) for (let dr=-2;dr<=2;dr++) {
+      const nq=q+dq, nr=r+dr, k=nq+','+nr;
+      if (!occ.has(k) && !drawn.has(k)) {
+        drawn.add(k);
+        const [sx,sy]=toS(nq,nr);
+        ctx.fillStyle='#ddd'; ctx.beginPath(); ctx.arc(sx,sy,2*sc,0,Math.PI*2); ctx.fill();
+      }
+    }
+  }
+
+  // P0: black
+  for (const [q,r] of playStones0) {
+    const [sx,sy]=toS(q,r); hex(sx,sy,hr);
+    ctx.fillStyle='#000'; ctx.fill(); ctx.strokeStyle='#000'; ctx.lineWidth=1; ctx.stroke();
+  }
+  // P1: white hatched (blue if sealbot)
+  const isSeal = playSession && playSession.opponent === 'sealbot';
+  for (const [q,r] of playStones1) {
+    const [sx,sy]=toS(q,r); hex(sx,sy,hr);
+    ctx.fillStyle = isSeal ? '#2563eb' : '#fff'; ctx.fill();
+    ctx.strokeStyle = isSeal ? '#1d4ed8' : '#000'; ctx.lineWidth=1.2; ctx.stroke();
+    if (!isSeal) {
+      ctx.save(); hex(sx,sy,hr); ctx.clip();
+      ctx.strokeStyle='#000'; ctx.lineWidth=0.6;
+      const step=Math.max(3,4*sc);
+      for(let d=-hr*2;d<=hr*2;d+=step){ctx.beginPath();ctx.moveTo(sx+d-hr,sy-hr);ctx.lineTo(sx+d+hr,sy+hr);ctx.stroke();}
+      ctx.restore();
+    }
+  }
+  // Move numbers
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  for (const mv of playMoveOrder) {
+    const [sx,sy]=toS(mv.q,mv.r);
+    ctx.fillStyle = mv.player===0 ? '#fff' : (isSeal ? '#fff' : '#000');
+    ctx.font = `bold ${Math.max(8,10*sc)}px 'SF Mono',monospace`;
+    ctx.fillText(mv.num, sx, sy);
+  }
+}
+
+function onPlayCanvasClick(e) {
+  if (!playSession) return;
+  const cv = el('play-canvas');
+  const rect = cv.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  if (!window._playTransform) return;
+  const {ox,oy,sc} = window._playTransform;
+  const S3 = Math.sqrt(3), HEX_SIZE = 20;
+  const px = (x - ox) / sc, py = (y - oy) / sc;
   const r_ax = Math.round(py / (HEX_SIZE * 1.5));
-  const q_ax = Math.round((px - HEX_SIZE * S3 / 2 * r_ax) / (HEX_SIZE * S3));
+  const q_ax = Math.round((px - HEX_SIZE * S3/2 * r_ax) / (HEX_SIZE * S3));
 
-  setInfo('Thinking...');
+  el('play-info').textContent = 'Thinking...';
   fetch('/api/play/move', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({session_id: playSession.id, q: q_ax, r: r_ax})
   }).then(r => r.json()).then(d => {
-    if (d.error) { setInfo(d.error); return; }
-    for (const m of d.moves) applyPlayMove(m.who, m.q, m.r);
-    drawHex();
+    if (d.error) { el('play-info').textContent = d.error; return; }
+    for (const m of d.moves) playApplyMove(m.who, m.q, m.r);
+    drawPlayBoard();
+    // Update move log
+    const ml = el('play-moves');
+    ml.textContent = playMoveOrder.map(m => `${m.num}.${m.who==='human'?'You':'Bot'}(${m.q},${m.r})`).join(' ');
+    ml.scrollTop = ml.scrollHeight;
+
     if (d.need_second) {
-      setInfo('Place your second stone');
+      el('play-info').textContent = 'Place your second stone';
     } else if (d.game_over) {
-      const who = d.winner === 'human' ? 'YOU WIN!' : (d.winner === 'bot' ? 'BOT WINS' : 'DRAW');
-      setInfo(who + ' (' + moveOrder.length + ' moves) — click PLAY to start again');
-      el('hex-canvas').removeEventListener('click', playClickHandler);
-      playClickHandler = null;
+      const msg = d.winner === 'human' ? 'YOU WIN!' : (d.winner === 'bot' ? 'BOT WINS!' : 'DRAW');
+      el('play-info').textContent = msg + ' (' + playMoveOrder.length + ' moves) - start a new game above';
+      cv.onclick = null;
       playSession = null;
     } else {
-      setInfo('YOUR TURN — click a hex');
+      el('play-info').textContent = 'YOUR TURN - click the board';
     }
-  }).catch(e => { setInfo('Error: ' + e); });
+  }).catch(e => { el('play-info').textContent = 'Error: ' + e; });
 }
 
 function lightsOut() {
@@ -2816,21 +2901,6 @@ if (settings.darkMode) {
 }
 
 </script>
-<div id="play-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:9998;align-items:center;justify-content:center;flex-direction:column;gap:16px">
-  <div style="background:#fff;padding:24px;border:2px solid #000;font:13px 'SF Mono','Courier New',monospace;min-width:300px;text-align:center">
-    <div style="font:bold 14px 'SF Mono',monospace;letter-spacing:3px;margin-bottom:16px">PLAY A GAME</div>
-    <div style="margin-bottom:12px">
-      <button onclick="startPlay('orca',true)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #000;background:#000;color:#fff;cursor:pointer;margin:4px;width:200px">vs Orca (you first)</button><br>
-      <button onclick="startPlay('orca',false)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #000;background:#fff;color:#000;cursor:pointer;margin:4px;width:200px">vs Orca (bot first)</button>
-    </div>
-    <div style="margin-bottom:12px">
-      <button onclick="startPlay('sealbot',true)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #2563eb;background:#2563eb;color:#fff;cursor:pointer;margin:4px;width:200px">vs SealBot (you first)</button><br>
-      <button onclick="startPlay('sealbot',false)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #2563eb;background:#fff;color:#2563eb;cursor:pointer;margin:4px;width:200px">vs SealBot (bot first)</button>
-    </div>
-    <button onclick="hidePlayMenu()" style="font:11px 'SF Mono',monospace;padding:6px 12px;border:1px solid #999;background:#fff;color:#999;cursor:pointer;margin-top:8px">Cancel</button>
-    <div id="play-status" style="font:10px 'SF Mono',monospace;color:#666;margin-top:12px;min-height:16px"></div>
-  </div>
-</div>
 <div id="lights-out-overlay">
   <span id="lights-out-status">TRAINING IN PROGRESS</span>
   <button id="lights-out-btn" onclick="lightsOff()">LIGHTS ON</button>
