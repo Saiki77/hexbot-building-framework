@@ -49,10 +49,11 @@ CHECKPOINT_EVERY = 1          # save checkpoint every N iterations
 MAX_WORKERS = 5               # parallel self-play workers
 GAMES_PER_FUTURE = 2          # games per subprocess future
 ELO_EVAL_EVERY = 3            # ELO evaluation frequency (every 3 iterations)
-ELO_EVAL_GAMES = 2            # games per ELO opponent (fast eval)
+ELO_EVAL_GAMES = 5            # 5 games per past generation
 ELO_EVAL_SIMS = 30            # MCTS sims during ELO games
-ELO_MAX_OPPONENTS = 3         # max past versions to play against
-ELO_BASELINE_GAMES = 2        # games vs random + heuristic baselines
+ELO_MAX_OPPONENTS = 3         # last 3 generations
+ELO_BASELINE_GAMES = 5        # 5 games vs random + 5 vs heuristic
+ELO_SEALBOT_GAMES = 10        # 10 games vs SealBot
 
 # ---------------------------------------------------------------------------
 # Model vault
