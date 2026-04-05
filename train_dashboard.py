@@ -998,11 +998,19 @@ def _play_bot_move(session):
     if opponent == 'sealbot':
         try:
             from opponents.ramora.adapter import create_ramora_bot
-            from opponents.ramora.game import HexGame as RamoraGame
-            # Cache sealbot + ramora game in session to preserve TT across moves
+            # MUST use SealBot's own game.py — the C++ does py::import("game")
+            # and checks Player.A identity. Different module = different objects = broken.
+            import importlib, sys as _sys
+            _sealbot_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                        'opponents', 'sealbot')
+            if _sealbot_dir not in _sys.path:
+                _sys.path.insert(0, _sealbot_dir)
+            _seal_game = importlib.import_module('game')
+            SealHexGame = _seal_game.HexGame
+            # Cache sealbot + game in session
             if '_sealbot' not in session:
                 session['_sealbot'] = create_ramora_bot(time_limit=2.0)
-                session['_rgame'] = RamoraGame()
+                session['_rgame'] = SealHexGame()
                 # Replay existing moves into ramora game
                 for who, q, r in session['moves']:
                     session['_rgame'].make_move(q, r)

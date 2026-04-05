@@ -14,8 +14,15 @@ _sealbot_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'sealbot
 _sealbot_best = os.path.join(_sealbot_dir, 'best')
 _sealbot_current = os.path.join(_sealbot_dir, 'current')
 
-# Import game types from the local ramora copy (same interface as SealBot's)
-from opponents.ramora.game import HexGame, Player
+# MUST use SealBot's own game.py — the C++ module does py::import("game")
+# and checks Player identity with `is`. If we use a different module's Player,
+# all stones get classified as P_B (identity check fails).
+import importlib
+if _sealbot_dir not in sys.path:
+    sys.path.insert(0, _sealbot_dir)
+_seal_game = importlib.import_module('game')
+HexGame = _seal_game.HexGame
+Player = _seal_game.Player
 
 
 def create_ramora_bot(time_limit: float = 1.0):
