@@ -574,8 +574,8 @@ class AutoTuner:
         buf_fill = metrics.get("buffer_fill", 0)
         loss_decreasing = (len(self.loss_history) >= 3 and
                            self.loss_history[-1] < self.loss_history[-3] * 0.95)
-        if buf_fill > 0.9 and loss_decreasing and p["train_steps"] < 600:
-            p["train_steps"] = min(600, p["train_steps"] + 50)
+        if buf_fill > 0.9 and loss_decreasing and p["train_steps"] < 300:
+            p["train_steps"] = min(300, p["train_steps"] + 50)
             changes.append(f"train_steps->{p['train_steps']}")
 
         if changes:
@@ -1083,6 +1083,8 @@ class OrcaTrainer:
 
             elo_thread = getattr(self, '_elo_thread', None)
             elo_running = elo_thread is not None and elo_thread.is_alive()
+            if elo_thread is not None and not elo_thread.is_alive():
+                self._elo_thread = None  # Clean up finished thread
             if (len(replay_buffer) >= BATCH_SIZE
                     and (iteration + 1) % self.elo_every == 0
                     and not elo_running):
