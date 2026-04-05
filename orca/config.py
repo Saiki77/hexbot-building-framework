@@ -21,7 +21,7 @@ NUM_SIMULATIONS = 400  # MCTS sims per move (curriculum may override)
 MCTS_BATCH_SIZE = 64   # positions per batched NN forward pass
 DIRICHLET_ALPHA = 0.3  # root noise (0.3 = diverse exploration)
 DIRICHLET_EPSILON = 0.25
-TEMP_THRESHOLD = 35    # moves before switching to greedy play
+TEMP_THRESHOLD = 20    # moves before switching to greedy play
 
 # ---------------------------------------------------------------------------
 # Distant play (colony strategy)
@@ -45,13 +45,13 @@ REPLAY_BUFFER_SIZE = 400_000  # experience replay capacity
 # ---------------------------------------------------------------------------
 DEFAULT_TRAIN_STEPS = 200     # gradient steps per iteration
 DEFAULT_GAMES_PER_ITER = 100  # base games (curriculum may adjust)
-CHECKPOINT_EVERY = 5          # save checkpoint every N iterations
+CHECKPOINT_EVERY = 1          # save checkpoint every N iterations
 MAX_WORKERS = 5               # parallel self-play workers
 GAMES_PER_FUTURE = 2          # games per subprocess future
-ELO_EVAL_EVERY = 2            # ELO evaluation frequency (iterations)
-ELO_EVAL_GAMES = 4            # games per ELO opponent
+ELO_EVAL_EVERY = 1            # ELO evaluation frequency (iterations)
+ELO_EVAL_GAMES = 5            # games per ELO opponent
 ELO_EVAL_SIMS = 30            # MCTS sims during ELO games (lower = faster eval)
-ELO_MAX_OPPONENTS = 6         # max past versions to play against
+ELO_MAX_OPPONENTS = 5         # max past versions to play against
 ELO_BASELINE_GAMES = 4        # games vs random + heuristic baselines (0 = disable)
 
 # ---------------------------------------------------------------------------
@@ -83,11 +83,11 @@ COSINE_ETA_MIN = 1e-4
 # ---------------------------------------------------------------------------
 # Defensive training (blocking reward)
 # ---------------------------------------------------------------------------
-BLOCKING_PRIORITY_BOOST = 3.0    # priority for moves that block opponent threats
-SURVIVAL_PRIORITY_BOOST = 2.0    # priority for surviving an opponent threat turn
+BLOCKING_PRIORITY_BOOST = 5.0    # priority for moves that block opponent threats
+SURVIVAL_PRIORITY_BOOST = 3.0    # priority for surviving an opponent threat turn
 USE_AB_HYBRID = True             # set False to disable AB pre-check in MCTS
 AB_HYBRID_DEPTH = 4              # depth of AB pre-check (0 = disable)
-THREAT_POLICY_BLEND = 0.3        # blend threat spatial map into policy logits (0 = disabled)
+THREAT_POLICY_BLEND = 0.5        # blend threat spatial map into policy logits (0 = disabled)
 
 # ---------------------------------------------------------------------------
 # Mixed precision (CUDA only - MPS FP16 is unreliable)

@@ -492,11 +492,11 @@ class AutoTuner:
         self.params = {
             "lr": 0.002,
             "sims": 10,
-            "mix_normal": 1.00,
-            "mix_catalog": 0.00,
-            "mix_endgame": 0.00,
-            "mix_formation": 0.00,
-            "mix_sequence": 0.00,
+            "mix_normal": 0.60,
+            "mix_catalog": 0.05,
+            "mix_endgame": 0.15,
+            "mix_formation": 0.15,
+            "mix_sequence": 0.05,
             "hint_blend": 0.3,
             "temp_threshold": 20,
             "train_steps": 200,
@@ -525,12 +525,13 @@ class AutoTuner:
             p["sims"] = 50
             changes.append("sims->50 (training cap)")
 
-        # Game mix: pure self-play (locked)
-        p["mix_normal"] = 1.0
-        p["mix_endgame"] = 0.0
-        p["mix_catalog"] = 0.0
-        p["mix_formation"] = 0.0
-        p["mix_sequence"] = 0.0
+        # Game mix: include tactical positions from the start
+        # Endgame/formation positions force blocking and advanced patterns
+        p["mix_normal"] = 0.60
+        p["mix_endgame"] = 0.15
+        p["mix_catalog"] = 0.05
+        p["mix_formation"] = 0.15
+        p["mix_sequence"] = 0.05
 
         # Hint blend: decay over time
         p["hint_blend"] = max(0.0, 0.3 - iteration * 0.015)
@@ -896,36 +897,27 @@ class OrcaTrainer:
                 print(f"  |  Training skipped: buffer too small "
                       f"({len(replay_buffer)}<{BATCH_SIZE})")
 
-            # -- ELO evaluation (every N iterations) --------------------------
+            # -- Pick up background ELO result from previous iteration --------
             elo_str = ""
-            if len(replay_buffer) >= BATCH_SIZE and (iteration + 1) % self.elo_every == 0:
-                self.model_vault.add(iteration + 1, self.net.state_dict())
-                n_opp = min(self.arena.max_opponents,
-                            len(self.model_vault) - 1)
-                n_eval_games = n_opp * self.arena.games_per_opponent
-                print(f"  |  ELO evaluation ({n_eval_games} games vs "
-                      f"{n_opp} generations, vault={len(self.model_vault)})...")
-                t_elo = time.perf_counter()
-                new_elo = self.arena.evaluate(
-                    self.net, self.model_vault, self.metrics["current_elo"])
-                t_elo = time.perf_counter() - t_elo
+            if hasattr(self, '_elo_result') and self._elo_result is not None:
+                new_elo, elo_iter = self._elo_result
+                self._elo_result = None
                 delta = new_elo - self.metrics["current_elo"]
                 sign = "+" if delta >= 0 else ""
                 self.metrics["current_elo"] = new_elo
                 self.metrics["elo_history"].append(
-                    {"iteration": iteration + 1, "elo": round(new_elo, 1)})
+                    {"iteration": elo_iter, "elo": round(new_elo, 1)})
                 update_curriculum_plateau(new_elo)
                 elo_str = f" | ELO {new_elo:.0f} ({sign}{delta:.0f})"
                 stall = (f" stall={_curriculum_stall_iters}"
                          if _curriculum_stall_iters > 0 else "")
 
-                # Checkpoint gating: only save best model
                 best = self.metrics.get("best_elo", 1000.0)
                 if new_elo > best:
                     self.metrics["best_elo"] = new_elo
-                    self.metrics["best_iteration"] = iteration + 1
+                    self.metrics["best_iteration"] = elo_iter
                     torch.save({"model_state_dict": self.net.state_dict(),
-                                "iteration": iteration + 1, "elo": new_elo},
+                                "iteration": elo_iter, "elo": new_elo},
                                "hex_best.pt")
                     print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
                           f"NEW BEST (saved hex_best.pt) {stall}")
@@ -933,6 +925,43 @@ class OrcaTrainer:
                     print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
                           f"(best: {best:.0f} @ iter {self.metrics.get('best_iteration', '?')}) "
                           f"{stall}")
+
+            # -- Launch background ELO evaluation ------------------------------
+            elo_thread = getattr(self, '_elo_thread', None)
+            elo_running = elo_thread is not None and elo_thread.is_alive()
+            if (len(replay_buffer) >= BATCH_SIZE
+                    and (iteration + 1) % self.elo_every == 0
+                    and not elo_running):
+                self.model_vault.add(iteration + 1, self.net.state_dict())
+                n_opp = min(self.arena.max_opponents,
+                            len(self.model_vault) - 1)
+                n_eval_games = n_opp * self.arena.games_per_opponent
+                print(f"  |  ELO evaluation started in background ({n_eval_games} games vs "
+                      f"{n_opp} generations, vault={len(self.model_vault)})")
+
+                # Copy weights so training can continue
+                eval_state = {k: v.clone() for k, v in self.net.state_dict().items()}
+                current_elo = self.metrics["current_elo"]
+                eval_iter = iteration + 1
+
+                def _elo_worker(state_dict, cur_elo, iter_num):
+                    try:
+                        eval_net = create_network(self.net_config)
+                        eval_net.load_state_dict(state_dict)
+                        eval_net.to(self.device)
+                        eval_net.eval()
+                        new_elo = self.arena.evaluate(
+                            eval_net, self.model_vault, cur_elo)
+                        self._elo_result = (new_elo, iter_num)
+                        del eval_net
+                    except Exception as e:
+                        print(f"  |  ELO worker error: {e}")
+
+                self._elo_thread = threading.Thread(
+                    target=_elo_worker,
+                    args=(eval_state, current_elo, eval_iter),
+                    daemon=True)
+                self._elo_thread.start()
 
             # -- Metrics & AutoTuner -----------------------------------------
             avg_len = total_moves / max(game_idx, 1)
@@ -1054,11 +1083,10 @@ class OrcaTrainer:
                 at = ckpt["auto_tuner"]
                 auto_tuner.params = at.get("params", auto_tuner.params)
                 auto_tuner.params["lr"] = optimizer.param_groups[0]["lr"]
-                auto_tuner.params["mix_normal"] = 1.0
-                auto_tuner.params["mix_catalog"] = 0.0
-                auto_tuner.params["mix_endgame"] = 0.0
-                auto_tuner.params["mix_formation"] = 0.0
-                auto_tuner.params["mix_sequence"] = 0.0
+                # Keep the tactical mix — don't reset to 100% normal
+                auto_tuner.params.setdefault("mix_normal", 0.60)
+                auto_tuner.params.setdefault("mix_endgame", 0.15)
+                auto_tuner.params.setdefault("mix_formation", 0.15)
                 auto_tuner.loss_history = at.get("loss_history", [])
                 auto_tuner.elo_history = at.get("elo_history", [])
 
