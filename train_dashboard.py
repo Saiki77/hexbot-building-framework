@@ -2132,6 +2132,7 @@ function replayGame(d) {
   replayMoveIdx = 0;
   stones0 = []; stones1 = []; moveOrder = [];
   currentGameType = d.game_type || 'selfplay';
+  renderHistory();  // update active highlight
   // Set analysis data (may be null if not available)
   analysisData = d._analysis || d.analysis || null;
   const vcw = el('value-chart-wrap');
@@ -2211,6 +2212,9 @@ const gameHistoryList = [];  // store last 20 games
 function addToHistory(d) {
   gameHistoryList.push(d);
   if (gameHistoryList.length > 10) gameHistoryList.shift();
+  renderHistory();
+}
+function renderHistory() {
   const histEl = el('game-history');
   if (!histEl) return;
   histEl.innerHTML = '';
@@ -2221,7 +2225,7 @@ function addToHistory(d) {
     const tag = g.game_type === 'vs_ramora' ? 'R' : '';
     span.textContent = '#' + g.game_idx + tag + ' ' + w + ' ' + g.num_moves + 'mv';
     if (g.game_type === 'vs_ramora') span.style.color = '#2563eb';
-    span.onclick = () => { replayPaused = false; replayGame(g); };
+    span.onclick = () => { replayPaused = false; replayGame(g); renderHistory(); };
     histEl.appendChild(span);
   });
   histEl.scrollTop = histEl.scrollHeight;

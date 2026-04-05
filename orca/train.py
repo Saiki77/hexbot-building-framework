@@ -822,30 +822,9 @@ class OrcaTrainer:
             self.net.to(self.device)
             print(f"  |  ONNX export: {time.perf_counter() - t_exp:.1f}s")
 
-            # Build position mix
-            all_positions = self._build_position_mix(
-                current_games, auto_tuner.params)
-
-            # -- Self-play ---------------------------------------------------
-            t_sp = time.perf_counter()
-            sp_result = self._run_self_play(
-                use_v2, current_sims, current_games, all_positions,
-                onnx_path, replay_buffer)
-            t_selfplay = time.perf_counter() - t_sp
-
-            game_idx = sp_result["game_idx"]
-            total_samples = sp_result["total_samples"]
-            total_moves = sp_result["total_moves"]
-            wins = sp_result["wins"]
-            collected_samples = sp_result["collected_samples"]
-
-            gps = game_idx / t_selfplay if t_selfplay > 0 else 0
-            print(f"  |  Self-play done: {game_idx} games, "
-                  f"{total_samples} samples, {t_selfplay:.1f}s "
-                  f"({gps:.1f} games/s)")
-            print(f"  |  Wins: P0={wins[0]} P1={wins[1]} draw={wins[2]}")
-
-            # Play games vs Ramora MinimaxBot (15% of iteration)
+            # -- Play games vs Ramora MinimaxBot (15% of iteration, first) --
+            collected_samples = []
+            total_samples = 0
             try:
                 from orca.config import RAMORA_GAME_FRACTION, RAMORA_TIME_LIMIT
                 n_ramora = max(1, int(current_games * RAMORA_GAME_FRACTION))
@@ -861,6 +840,29 @@ class OrcaTrainer:
                 self.metrics['ramora_draws'] += ramora_results.get('draws', 0)
             except Exception as e:
                 print(f"  |  Ramora games skipped: {e}")
+
+            # Build position mix
+            all_positions = self._build_position_mix(
+                current_games, auto_tuner.params)
+
+            # -- Self-play ---------------------------------------------------
+            t_sp = time.perf_counter()
+            sp_result = self._run_self_play(
+                use_v2, current_sims, current_games, all_positions,
+                onnx_path, replay_buffer)
+            t_selfplay = time.perf_counter() - t_sp
+
+            game_idx = sp_result["game_idx"]
+            total_samples += sp_result["total_samples"]
+            total_moves = sp_result["total_moves"]
+            wins = sp_result["wins"]
+            collected_samples.extend(sp_result["collected_samples"])
+
+            gps = game_idx / t_selfplay if t_selfplay > 0 else 0
+            print(f"  |  Self-play done: {game_idx} games, "
+                  f"{total_samples} samples, {t_selfplay:.1f}s "
+                  f"({gps:.1f} games/s)")
+            print(f"  |  Wins: P0={wins[0]} P1={wins[1]} draw={wins[2]}")
 
             # Load online games
             self._load_online_games(replay_buffer, collected_samples)
