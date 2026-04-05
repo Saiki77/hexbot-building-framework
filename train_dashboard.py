@@ -577,7 +577,8 @@ class DashboardObserver:
                          move_history: list, result: float,
                          num_samples: int,
                          analysis_data: list = None,
-                         game_type: str = 'selfplay') -> None:
+                         game_type: str = 'selfplay',
+                         orca_result: float = None) -> None:
         data = {
             'game_idx': game_idx,
             'total_games': total_games,
@@ -586,6 +587,8 @@ class DashboardObserver:
             'moves': move_history,
             'game_type': game_type,
         }
+        if orca_result is not None:
+            data['orca_result'] = orca_result
         if analysis_data:
             data['analysis'] = analysis_data
         tag = f' [{game_type}]' if game_type != 'selfplay' else ''
@@ -876,6 +879,151 @@ def api_gamelength():
                 'avg_game_length': round(avg, 1),
             })
     return jsonify(data)
+
+
+# ---------------------------------------------------------------------------
+# Interactive play: Human vs Orca / Human vs SealBot
+# ---------------------------------------------------------------------------
+_play_sessions = {}  # session_id -> {game, bot, bot_name, moves, human_player}
+
+
+@app.route('/api/play/start', methods=['POST'])
+def play_start():
+    """Start a new interactive game. body: {opponent: 'orca'|'sealbot', human_first: true}"""
+    data = request.json or {}
+    opponent = data.get('opponent', 'orca')
+    human_first = data.get('human_first', True)
+
+    from orca.encoding import CGameState
+    game = CGameState(max_total_stones=200)
+    session_id = str(id(game))
+
+    session = {
+        'game': game,
+        'opponent': opponent,
+        'moves': [],
+        'human_player': 0 if human_first else 1,
+        'game_over': False,
+        'winner': None,
+    }
+    _play_sessions[session_id] = session
+
+    # If bot goes first, make bot's move(s)
+    result = {'session_id': session_id, 'moves': [], 'game_over': False}
+    if not human_first:
+        bot_moves = _play_bot_move(session)
+        result['moves'] = bot_moves
+
+    return jsonify(result)
+
+
+@app.route('/api/play/move', methods=['POST'])
+def play_move():
+    """Human places a stone. body: {session_id, q, r}"""
+    data = request.json or {}
+    sid = data.get('session_id')
+    q, r = data.get('q', 0), data.get('r', 0)
+    session = _play_sessions.get(sid)
+    if not session or session['game_over']:
+        return jsonify({'error': 'No active game'}), 400
+
+    game = session['game']
+    game.place_stone(q, r)
+    session['moves'].append(('human', q, r))
+
+    result = {'moves': [{'who': 'human', 'q': q, 'r': r}], 'game_over': False}
+
+    if game.is_terminal:
+        session['game_over'] = True
+        w = game._lib.board_get_winner(game._ptr)
+        session['winner'] = 'human' if w == session['human_player'] else 'bot'
+        result['game_over'] = True
+        result['winner'] = session['winner']
+        return jsonify(result)
+
+    # Check if human has more stones this turn (connect-6 double move)
+    stt = game._lib.board_get_stones_this_turn(game._ptr)
+    spt = game._lib.board_get_stones_per_turn(game._ptr)
+    if stt < spt:
+        # Human places second stone
+        result['need_second'] = True
+        return jsonify(result)
+
+    # Bot's turn
+    bot_moves = _play_bot_move(session)
+    result['moves'].extend(bot_moves)
+    if session['game_over']:
+        result['game_over'] = True
+        result['winner'] = session['winner']
+    return jsonify(result)
+
+
+@app.route('/api/play/state', methods=['POST'])
+def play_state():
+    """Get current game state."""
+    data = request.json or {}
+    sid = data.get('session_id')
+    session = _play_sessions.get(sid)
+    if not session:
+        return jsonify({'error': 'No active game'}), 400
+    return jsonify({
+        'moves': [{'who': w, 'q': q, 'r': r} for w, q, r in session['moves']],
+        'game_over': session['game_over'],
+        'winner': session.get('winner'),
+        'opponent': session['opponent'],
+    })
+
+
+def _play_bot_move(session):
+    """Have the bot make its move(s). Returns list of {who, q, r} dicts."""
+    game = session['game']
+    opponent = session['opponent']
+    bot_moves = []
+
+    if opponent == 'sealbot':
+        try:
+            from opponents.ramora.adapter import create_ramora_bot
+            from opponents.ramora.game import HexGame as RamoraGame, Player as RamoraPlayer
+            sealbot = create_ramora_bot(time_limit=1.0)
+            # Rebuild Ramora game state from moves
+            rgame = RamoraGame()
+            for who, q, r in session['moves']:
+                rgame.make_move(q, r)
+            result = sealbot.get_move(rgame)
+            for m in result:
+                q, r = m[0], m[1]
+                game.place_stone(q, r)
+                session['moves'].append(('bot', q, r))
+                bot_moves.append({'who': 'bot', 'q': q, 'r': r})
+                if game.is_terminal:
+                    break
+        except Exception as e:
+            print(f"  |  SealBot play error: {e}")
+    else:
+        # Orca MCTS
+        if training_mgr and training_mgr.net:
+            from orca.search import BatchedMCTS
+            net = training_mgr.net
+            net.eval()
+            mcts = BatchedMCTS(net, num_simulations=200, batch_size=64)
+            spt = game._lib.board_get_stones_per_turn(game._ptr)
+            for _ in range(spt):
+                if game.is_terminal:
+                    break
+                policy = mcts.search(game, temperature=0.1, add_noise=False)
+                if not policy:
+                    break
+                best = max(policy, key=policy.get)
+                game.place_stone(best[0], best[1])
+                session['moves'].append(('bot', best[0], best[1]))
+                bot_moves.append({'who': 'bot', 'q': best[0], 'r': best[1]})
+
+    if game.is_terminal:
+        session['game_over'] = True
+        w = game._lib.board_get_winner(game._ptr)
+        session['winner'] = 'human' if w == session['human_player'] else ('bot' if w >= 0 else 'draw')
+
+    return bot_moves
 
 
 @app.route('/api/train/start', methods=['POST'])
@@ -1330,7 +1478,7 @@ body.dark #value-chart-wrap{border-color:#333}
 <body>
 <header>
   <span class="title">Hex Bot Training</span>
-  <button id="btn-start" onclick="startTraining()" style="background:#000;color:#fff;border:none;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9654;</button><button id="btn-stop" onclick="stopTraining()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9632;</button><span class="status" id="status">IDLE</span>
+  <button id="btn-start" onclick="startTraining()" style="background:#000;color:#fff;border:none;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9654;</button><button id="btn-stop" onclick="stopTraining()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer">&#9632;</button><button onclick="showPlayMenu()" style="background:#fff;color:#000;border:1px solid #000;padding:4px 10px;font:13px 'Courier New';cursor:pointer;margin-left:8px">PLAY</button><span class="status" id="status">IDLE</span>
   <span class="conn-dot" id="conn-dot" style="background:#ccc" title="Disconnected"></span>
 
 </header>
@@ -1913,6 +2061,7 @@ function drawHex() {
   const spanX = mxX - mnX + mg * 2, spanY = mxY - mnY + mg * 2;
   const sc = Math.min(W / spanX, H / spanY, 2.5);
   const ox = W / 2 - (mnX + mxX) / 2 * sc, oy = H / 2 - (mnY + mxY) / 2 * sc;
+  window._lastHexTransform = {ox, oy, sc};
 
   function toS(q, r) {
     const [px, py] = axToPixel(q, r);
@@ -2255,11 +2404,12 @@ socket.on('game_complete', d => {
     const lsL = el('ls-len'); if (lsL && gameStats.count) lsL.textContent = Math.round(gameStats.totalLen / gameStats.count);
     const lsW0 = el('ls-w0'); if (lsW0 && gameStats.count) lsW0.textContent = Math.round(gameStats.w0 / gameStats.count * 100) + '%';
     const lsW1 = el('ls-w1'); if (lsW1 && gameStats.count) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
-    // Track Ramora stats
+    // Track Ramora/SealBot stats (use orca_result which is always from Orca's perspective)
     if (d.game_type === 'vs_ramora') {
       if (!window._ramoraStats) window._ramoraStats = {w:0, l:0, d:0};
-      if (d.result > 0) window._ramoraStats.w++;
-      else if (d.result < 0) window._ramoraStats.l++;
+      const or_ = d.orca_result != null ? d.orca_result : d.result;
+      if (or_ > 0) window._ramoraStats.w++;
+      else if (or_ < 0) window._ramoraStats.l++;
       else window._ramoraStats.d++;
       const rs = window._ramoraStats;
       const rn = rs.w + rs.l + rs.d;
@@ -2541,6 +2691,110 @@ function toggleDarkMode(on) {
 }
 
 // --- Lights out: black screen with minimal status ---
+// --- Interactive Play ---
+let playSession = null;
+let playClickHandler = null;
+
+function showPlayMenu() {
+  el('play-overlay').style.display = 'flex';
+  el('play-status').textContent = '';
+}
+function hidePlayMenu() {
+  el('play-overlay').style.display = 'none';
+  if (playClickHandler) {
+    el('hex-canvas').removeEventListener('click', playClickHandler);
+    playClickHandler = null;
+  }
+  playSession = null;
+}
+function startPlay(opponent, humanFirst) {
+  el('play-status').textContent = 'Starting...';
+  fetch('/api/play/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({opponent: opponent, human_first: humanFirst})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { el('play-status').textContent = d.error; return; }
+    playSession = {id: d.session_id, opponent: opponent, humanFirst: humanFirst};
+    el('play-overlay').style.display = 'none';
+
+    // Reset board for interactive play
+    stones0 = []; stones1 = []; moveOrder = [];
+    currentGameType = opponent === 'sealbot' ? 'vs_ramora' : 'selfplay';
+    replayBusy = false;
+    if (replayTimer) { clearInterval(replayTimer); replayTimer = null; }
+
+    // Apply bot's first moves if bot went first
+    if (d.moves) {
+      for (const m of d.moves) applyPlayMove(m.who, m.q, m.r);
+    }
+    drawHex();
+    setInfo('YOUR TURN — click a hex to place a stone (vs ' + opponent + ')');
+    el('game-num').textContent = 'PLAY vs ' + opponent.toUpperCase();
+
+    // Add click handler to canvas
+    const canvas = el('hex-canvas');
+    if (playClickHandler) canvas.removeEventListener('click', playClickHandler);
+    playClickHandler = function(e) { onPlayClick(e); };
+    canvas.addEventListener('click', playClickHandler);
+  }).catch(e => { el('play-status').textContent = 'Error: ' + e; });
+}
+
+function applyPlayMove(who, q, r) {
+  const moveNum = moveOrder.length + 1;
+  // Figure out which player based on move order (same as rebuildBoard)
+  let p = 0, stt = 0, need = 1;
+  for (let i = 0; i < moveOrder.length; i++) {
+    stt++;
+    if (stt >= need) { p = 1 - p; stt = 0; need = 2; }
+  }
+  if (p === 0) stones0.push([q, r]); else stones1.push([q, r]);
+  moveOrder.push({q, r, num: moveNum, player: p});
+}
+
+function onPlayClick(e) {
+  if (!playSession) return;
+  const canvas = el('hex-canvas');
+  const rect = canvas.getBoundingClientRect();
+  const DPR = window.devicePixelRatio || 1;
+  const cx = (e.clientX - rect.left) * DPR;
+  const cy = (e.clientY - rect.top) * DPR;
+
+  // Convert pixel to axial coords (reverse of toS in drawHex)
+  // We need the current transform params from the last drawHex call
+  if (!window._lastHexTransform) return;
+  const {ox, oy, sc: hsc} = window._lastHexTransform;
+  const S3 = Math.sqrt(3);
+  const px = (cx / DPR - ox) / hsc;
+  const py = (cy / DPR - oy) / hsc;
+  // Reverse axial-to-pixel: px = HEX_SIZE*(S3*q + S3/2*r), py = HEX_SIZE*(1.5*r)
+  const HEX_SIZE = 20; // matches drawHex
+  const r_ax = Math.round(py / (HEX_SIZE * 1.5));
+  const q_ax = Math.round((px - HEX_SIZE * S3 / 2 * r_ax) / (HEX_SIZE * S3));
+
+  setInfo('Thinking...');
+  fetch('/api/play/move', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: playSession.id, q: q_ax, r: r_ax})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { setInfo(d.error); return; }
+    for (const m of d.moves) applyPlayMove(m.who, m.q, m.r);
+    drawHex();
+    if (d.need_second) {
+      setInfo('Place your second stone');
+    } else if (d.game_over) {
+      const who = d.winner === 'human' ? 'YOU WIN!' : (d.winner === 'bot' ? 'BOT WINS' : 'DRAW');
+      setInfo(who + ' (' + moveOrder.length + ' moves) — click PLAY to start again');
+      el('hex-canvas').removeEventListener('click', playClickHandler);
+      playClickHandler = null;
+      playSession = null;
+    } else {
+      setInfo('YOUR TURN — click a hex');
+    }
+  }).catch(e => { setInfo('Error: ' + e); });
+}
+
 function lightsOut() {
   // Temporarily remove dark mode filter so overlay is pure black
   document.body.classList.remove('dark');
@@ -2562,6 +2816,21 @@ if (settings.darkMode) {
 }
 
 </script>
+<div id="play-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:9998;align-items:center;justify-content:center;flex-direction:column;gap:16px">
+  <div style="background:#fff;padding:24px;border:2px solid #000;font:13px 'SF Mono','Courier New',monospace;min-width:300px;text-align:center">
+    <div style="font:bold 14px 'SF Mono',monospace;letter-spacing:3px;margin-bottom:16px">PLAY A GAME</div>
+    <div style="margin-bottom:12px">
+      <button onclick="startPlay('orca',true)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #000;background:#000;color:#fff;cursor:pointer;margin:4px;width:200px">vs Orca (you first)</button><br>
+      <button onclick="startPlay('orca',false)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #000;background:#fff;color:#000;cursor:pointer;margin:4px;width:200px">vs Orca (bot first)</button>
+    </div>
+    <div style="margin-bottom:12px">
+      <button onclick="startPlay('sealbot',true)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #2563eb;background:#2563eb;color:#fff;cursor:pointer;margin:4px;width:200px">vs SealBot (you first)</button><br>
+      <button onclick="startPlay('sealbot',false)" style="font:12px 'SF Mono',monospace;padding:8px 16px;border:2px solid #2563eb;background:#fff;color:#2563eb;cursor:pointer;margin:4px;width:200px">vs SealBot (bot first)</button>
+    </div>
+    <button onclick="hidePlayMenu()" style="font:11px 'SF Mono',monospace;padding:6px 12px;border:1px solid #999;background:#fff;color:#999;cursor:pointer;margin-top:8px">Cancel</button>
+    <div id="play-status" style="font:10px 'SF Mono',monospace;color:#666;margin-top:12px;min-height:16px"></div>
+  </div>
+</div>
 <div id="lights-out-overlay">
   <span id="lights-out-status">TRAINING IN PROGRESS</span>
   <button id="lights-out-btn" onclick="lightsOff()">LIGHTS ON</button>

@@ -79,9 +79,13 @@ class PrintObserver:
                          move_history: list, result: float,
                          num_samples: int,
                          analysis_data: list = None,
-                         game_type: str = 'selfplay') -> None:
+                         game_type: str = 'selfplay',
+                         orca_result: float = None) -> None:
         winner = "P0" if result > 0 else ("P1" if result < 0 else "draw")
         tag = f" [{game_type}]" if game_type != 'selfplay' else ""
+        if game_type == 'vs_ramora' and orca_result is not None:
+            who = "Orca" if orca_result > 0 else ("SealBot" if orca_result < 0 else "draw")
+            tag = f" [vs SealBot: {who} wins]"
         print(f"  |  Game {game_idx}/{total_games}: {winner} "
               f"in {len(move_history)} moves ({num_samples} samples){tag}")
 
@@ -1212,16 +1216,25 @@ class OrcaTrainer:
             else: draws += 1
 
             # Emit game_complete with game_type for dashboard coloring
+            # For vs_ramora: result is always from P0 perspective (standard)
+            # orca_result is from Orca's perspective (for Ramora stats tracking)
             move_list = [(q, r) for _, q, r in moves]
-            result_val = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
-            if not orca_first:
-                result_val = -result_val  # flip for P0/P1 perspective
+            # P0 perspective: who won as P0?
+            if w == 'orca':
+                result_val = 1.0 if orca_first else -1.0
+            elif w == 'ramora':
+                result_val = -1.0 if orca_first else 1.0
+            else:
+                result_val = 0.0
+            # Orca perspective (for Ramora winrate display)
+            orca_result = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
             self.observer.on_game_complete(
                 game_idx=i + 1, total_games=n_games,
                 move_history=move_list, result=result_val,
                 num_samples=len(samples),
                 analysis_data=None,
-                game_type='vs_ramora')
+                game_type='vs_ramora',
+                orca_result=orca_result)
 
         elapsed = time.perf_counter() - t0
         print(f"  |  Ramora games: {n_games} games, {wins}W/{losses}L/{draws}D, "
