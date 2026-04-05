@@ -10,6 +10,8 @@ import sys
 
 # Use SealBot's game.py (same interface as ramora's)
 _sealbot_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'sealbot')
+# Use best/ (promoted strongest version) over current/ (development)
+_sealbot_best = os.path.join(_sealbot_dir, 'best')
 _sealbot_current = os.path.join(_sealbot_dir, 'current')
 
 # Import game types from the local ramora copy (same interface as SealBot's)
@@ -23,10 +25,16 @@ def create_ramora_bot(time_limit: float = 1.0):
         # SealBot needs its own game.py importable as 'game'
         if _sealbot_dir not in sys.path:
             sys.path.insert(0, _sealbot_dir)
-        if _sealbot_current not in sys.path:
-            sys.path.insert(0, _sealbot_current)
+        # Try best/ first (promoted strongest), fall back to current/
+        for d in [_sealbot_best, _sealbot_current]:
+            if d not in sys.path:
+                sys.path.insert(0, d)
+        # Force reimport to get the right .so
+        if 'minimax_cpp' in sys.modules:
+            del sys.modules['minimax_cpp']
         from minimax_cpp import MinimaxBot as SealBot
         bot = SealBot(time_limit)
+        print(f"  |  SealBot loaded: depth_limit={bot.max_depth}, time={time_limit}s")
         return bot
     except Exception:
         print("  |  WARNING: SealBot C++ not compiled, falling back to Python MinimaxBot")
