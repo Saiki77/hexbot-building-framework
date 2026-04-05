@@ -996,7 +996,7 @@ def _play_bot_move(session):
         try:
             from opponents.ramora.adapter import create_ramora_bot
             from opponents.ramora.game import HexGame as RamoraGame
-            sealbot = create_ramora_bot(time_limit=1.0)
+            sealbot = create_ramora_bot(time_limit=2.0)
             # Rebuild Ramora game state from moves
             rgame = RamoraGame()
             for who, q, r in session['moves']:
