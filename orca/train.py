@@ -1362,27 +1362,11 @@ class OrcaTrainer:
                     collected_samples.append(s)
 
                 else:
-                    # --- SealBot's move: expert demonstration ---
-                    policy_target = np.zeros(19 * 19, dtype=np.float32)
-                    iq, ir = q - oq, r - orr
-                    if 0 <= iq < 19 and 0 <= ir < 19:
-                        policy_target[iq * 19 + ir] = 1.0
-
-                    # Result from SealBot's perspective (inverted)
-                    # Clamp to [-1, 1] for stability
-                    seal_result = max(-1.0, min(1.0, -base_orca_result * decay))
-
-                    s = TrainingSample(
-                        encoded_state=enc,
-                        policy_target=policy_target,
-                        player=game.current_player,
-                        result=seal_result,
-                        threat_label=threat,
-                        priority=1.0,  # low priority — bootstrapping only
-                    )
-                    samples.append(s)
-                    replay_buffer.push(s)
-                    collected_samples.append(s)
+                    # --- SealBot's move: skip for now ---
+                    # Expert demo samples disabled until loss stabilizes.
+                    # They may confuse the value head with mixed perspectives.
+                    # TODO: re-enable once loss < 3.0 (same auto-switch as soft targets)
+                    pass
 
                 game.place_stone(q, r)
 
