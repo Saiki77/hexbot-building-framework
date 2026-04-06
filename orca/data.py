@@ -103,11 +103,24 @@ class ReplayBuffer:
 
     def sample(self, batch_size: int) -> Tuple[List[TrainingSample], List[int]]:
         """Returns (samples, indices) for priority updating."""
-        n = min(batch_size, len(self.buffer))
-        priors = np.array(self.priorities, dtype=np.float64)
-        priors /= priors.sum()
-        indices = np.random.choice(len(self.buffer), size=n, replace=False, p=priors)
+        # Snapshot buffer and priorities to avoid race condition
+        # (SealBot thread may push samples concurrently)
         buf = list(self.buffer)
+        pri = list(self.priorities)
+        # Ensure same length (trim to shorter if race happened)
+        sz = min(len(buf), len(pri))
+        if sz == 0:
+            return [], []
+        buf = buf[:sz]
+        pri = pri[:sz]
+        n = min(batch_size, sz)
+        priors = np.array(pri, dtype=np.float64)
+        s = priors.sum()
+        if s > 0:
+            priors /= s
+        else:
+            priors = np.ones(sz, dtype=np.float64) / sz
+        indices = np.random.choice(sz, size=n, replace=False, p=priors)
         return [buf[i] for i in indices], indices.tolist()
 
     def update_priorities(self, indices: List[int], errors: List[float]) -> None:
