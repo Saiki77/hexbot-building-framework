@@ -822,7 +822,7 @@ def api_elo():
     result = {
         'elo_history': metrics_store.get_elo_history(),
         'vault_size': len(training_mgr.model_vault) if training_mgr and training_mgr.model_vault else 0,
-        'matchups': training_mgr.arena.get_matchup_summary() if training_mgr and training_mgr.arena else {},
+        'matchups': training_mgr.arena.matchup_history[-1] if training_mgr and training_mgr.arena and training_mgr.arena.matchup_history else {},
     }
     return jsonify(result)
 
