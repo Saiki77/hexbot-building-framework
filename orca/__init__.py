@@ -10,7 +10,7 @@ Training:
     python -m orca.train --iterations 100
 """
 
-__version__ = '4.1.1'
+__version__ = '4.1.2'
 BOT_NAME = 'Orca'
 
 import os
