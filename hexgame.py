@@ -29,6 +29,7 @@ Rules:
 from __future__ import annotations
 
 import ctypes
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,76 +38,173 @@ from typing import Dict, List, Optional, Tuple
 __all__ = ['HexGame']
 
 # ---------------------------------------------------------------------------
-# C Engine loader (auto-compiles if needed)
+# C Engine loader (auto-compiles if needed) -- cross-platform
 # ---------------------------------------------------------------------------
 
+_IS_WINDOWS = sys.platform.startswith('win')
+_IS_MACOS = sys.platform == 'darwin'
+_LIB_EXT = '.dll' if _IS_WINDOWS else '.so'
+
+
 def _find_engine_dir() -> Path:
-    """Locate the directory that contains engine.c / engine.so.
+    """Locate the directory that contains engine.c and/or a pre-built engine
+    shared library.
 
     Order of preference:
-      1. ``orca/`` sibling of this file - this is where the engine ships
-         in the pip-installed wheel (and where dev checkouts also keep it).
-      2. The same directory as this file - legacy layout from before the
+      1. ``orca/`` sibling of this file -- where the engine ships in the
+         pip-installed wheel (and where dev checkouts also keep it).
+      2. The same directory as this file -- legacy layout from before the
          engine was moved into the orca package.
+
+    A directory counts as "the engine dir" if it contains ``engine.c`` OR any
+    pre-built shared library named ``engine.so`` / ``engine.dll`` /
+    ``engine.dylib``.
     """
     here = Path(__file__).resolve().parent
-    candidates = [here / 'orca', here]
-    for d in candidates:
-        if (d / 'engine.c').exists() or (d / 'engine.so').exists():
+    lib_names = ('engine.so', 'engine.dll', 'engine.dylib')
+    for d in (here / 'orca', here):
+        if (d / 'engine.c').exists() or any((d / n).exists() for n in lib_names):
             return d
-    # Default to the orca subdir so error messages point at the new layout.
-    return candidates[0]
+    return here / 'orca'
 
 
 _ENGINE_DIR = _find_engine_dir()
 _ENGINE_SRC = _ENGINE_DIR / 'engine.c'
-_ENGINE_LIB = _ENGINE_DIR / 'engine.so'
+_ENGINE_LIB = _ENGINE_DIR / f'engine{_LIB_EXT}'
 _lib = None
 
 
+def _find_prebuilt_lib() -> Optional[Path]:
+    """Return any pre-built engine shared library in the engine dir, regardless
+    of which platform-specific extension it uses. Lets a wheel that ships a
+    pre-compiled binary be loaded without a recompile."""
+    for name in ('engine.so', 'engine.dll', 'engine.dylib'):
+        p = _ENGINE_DIR / name
+        if p.exists():
+            return p
+    return None
+
+
+def _compiler_attempts() -> List[Tuple[str, List[str]]]:
+    """Build an ordered list of ``(label, argv)`` compile attempts to try.
+
+    On Unix we try ``cc``, ``gcc``, ``clang`` with ``-O3 -march=native -shared
+    -fPIC``, then the same compilers without ``-march=native`` as a fallback
+    (some older Apple Clang versions on arm64 don't accept it).
+
+    On Windows we try MSVC's ``cl.exe`` first (using ``/LD /O2``), then any
+    MinGW/MSYS2/Cygwin ``gcc``/``clang``/``cc`` that happens to be on PATH.
+    """
+    attempts: List[Tuple[str, List[str]]] = []
+    src, out = str(_ENGINE_SRC), str(_ENGINE_LIB)
+
+    if _IS_WINDOWS:
+        if shutil.which('cl'):
+            attempts.append(('cl (MSVC)', [
+                'cl', '/nologo', '/LD', '/O2', src, f'/Fe:{out}',
+            ]))
+        for cc in ('gcc', 'clang', 'cc'):
+            if shutil.which(cc):
+                attempts.append((cc, [
+                    cc, '-O3', '-shared', '-o', out, src,
+                ]))
+        return attempts
+
+    # Unix (Linux + macOS): try cc/gcc/clang with -march=native first,
+    # then the same set without it as a fallback.
+    base_flags = ['-O3', '-shared', '-fPIC']
+    march_flags = ['-march=native']
+    for tier_flags in (march_flags + base_flags, base_flags):
+        for cc in ('cc', 'gcc', 'clang'):
+            if shutil.which(cc):
+                attempts.append((f'{cc} {" ".join(tier_flags)}',
+                                 [cc, *tier_flags, '-o', out, src]))
+    return attempts
+
+
+def _install_hint() -> str:
+    """Platform-specific hint for how to get a working C compiler."""
+    if _IS_WINDOWS:
+        return ("Install one of: 'Microsoft C++ Build Tools' "
+                "(https://visualstudio.microsoft.com/visual-cpp-build-tools/), "
+                "MSYS2 with gcc (https://www.msys2.org/), or LLVM "
+                "(https://releases.llvm.org/).")
+    if _IS_MACOS:
+        return "Install Xcode Command Line Tools: run  xcode-select --install"
+    return ("Install a C compiler. On Debian/Ubuntu:  sudo apt install build-essential   "
+            "On Fedora/RHEL:  sudo dnf install gcc   On Alpine:  apk add build-base")
+
+
 def _compile_engine():
-    """Compile engine.c to engine.so if missing or outdated."""
-    if _ENGINE_LIB.exists() and _ENGINE_SRC.exists():
-        if _ENGINE_LIB.stat().st_mtime >= _ENGINE_SRC.stat().st_mtime:
-            return  # up to date
+    """Compile ``engine.c`` to a platform-appropriate shared library.
+
+    Skips the compile if a pre-built library is already present and fresher
+    than the source. Iterates through every compiler/flag combination from
+    :func:`_compiler_attempts`, capturing stderr from each, and only raises if
+    all of them fail. Error messages include a platform-specific install hint.
+    """
+    global _ENGINE_LIB
+
+    # 1. Pre-built binary already there?  (Wheel shipped one, or we compiled
+    # earlier.) Anything matching engine.so/.dll/.dylib counts -- this lets a
+    # wheel built with cibuildwheel ship a pre-compiled binary that's used
+    # without a recompile.
+    prebuilt = _find_prebuilt_lib()
+    if prebuilt is not None:
+        if not _ENGINE_SRC.exists() or prebuilt.stat().st_mtime >= _ENGINE_SRC.stat().st_mtime:
+            _ENGINE_LIB = prebuilt
+            return
+
     if not _ENGINE_SRC.exists():
         raise FileNotFoundError(
             f"engine.c not found at {_ENGINE_SRC}. "
-            f"If you installed via pip, please reinstall: pip install --force-reinstall hexbot"
+            f"If you installed via pip, reinstall:  pip install --force-reinstall hexbot"
         )
-    print(f"Compiling {_ENGINE_SRC.name}...", file=sys.stderr)
-    try:
-        subprocess.run(
-            ['cc', '-O3', '-march=native', '-shared', '-fPIC',
-             '-o', str(_ENGINE_LIB), str(_ENGINE_SRC)],
-            check=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+
+    attempts = _compiler_attempts()
+    if not attempts:
         raise RuntimeError(
-            f"Failed to compile {_ENGINE_SRC}. A C compiler (cc/gcc/clang) is required. "
-            f"Original error: {e}"
-        ) from e
+            f"No C compiler found on PATH. {_install_hint()}"
+        )
+
+    print(f"Compiling {_ENGINE_SRC.name} ...", file=sys.stderr)
+    errors: List[str] = []
+    for label, cmd in attempts:
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True,
+                           cwd=str(_ENGINE_DIR))
+            return  # success
+        except FileNotFoundError as e:
+            errors.append(f"  {label}: compiler vanished ({e})")
+        except subprocess.CalledProcessError as e:
+            tail = (e.stderr or e.stdout or '').strip().splitlines()[-3:]
+            errors.append(f"  {label}: exit {e.returncode}\n    " +
+                          "\n    ".join(tail))
+
+    raise RuntimeError(
+        f"All compile attempts for {_ENGINE_SRC} failed:\n"
+        + "\n".join(errors)
+        + f"\n\n{_install_hint()}"
+    )
 
 
 def _load_engine():
-    """Load the C engine shared library."""
+    """Load the C engine shared library, compiling it first if needed."""
     global _lib
     if _lib is not None:
         return _lib
     _compile_engine()
     if not _ENGINE_LIB.exists():
-        raise RuntimeError(f"C engine not found at {_ENGINE_LIB}")
+        raise RuntimeError(f"C engine not found at {_ENGINE_LIB} after compile")
     _lib = ctypes.CDLL(str(_ENGINE_LIB))
     _setup_signatures(_lib)
     return _lib
 
 
 def get_engine_path() -> Path:
-    """Return the path to the loaded engine.so (compiling it first if needed).
-
-    Useful for other modules that need to load the C engine directly (e.g.
-    with their own ctypes signatures) without going through HexGame.
-    """
+    """Return the path to the loaded engine shared library, compiling first if
+    needed. Useful for other modules that need to load the engine directly
+    with their own ctypes signatures."""
     _load_engine()
     return _ENGINE_LIB
 
