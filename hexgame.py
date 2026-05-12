@@ -46,6 +46,15 @@ _IS_MACOS = sys.platform == 'darwin'
 _LIB_EXT = '.dll' if _IS_WINDOWS else '.so'
 
 
+_LIB_GLOBS = (
+    # setuptools / cibuildwheel-built extensions
+    '_engine*.so', '_engine*.pyd', '_engine*.dylib',
+    'engine*.so', 'engine*.pyd', 'engine*.dylib',
+    # runtime-compiled fallback, plus the Windows DLL name
+    'engine.dll', '_engine.dll',
+)
+
+
 def _find_engine_dir() -> Path:
     """Locate the directory that contains engine.c and/or a pre-built engine
     shared library.
@@ -57,30 +66,61 @@ def _find_engine_dir() -> Path:
          engine was moved into the orca package.
 
     A directory counts as "the engine dir" if it contains ``engine.c`` OR any
-    pre-built shared library named ``engine.so`` / ``engine.dll`` /
-    ``engine.dylib``.
+    pre-built binary matching one of :data:`_LIB_GLOBS`.
     """
     here = Path(__file__).resolve().parent
-    lib_names = ('engine.so', 'engine.dll', 'engine.dylib')
     for d in (here / 'orca', here):
-        if (d / 'engine.c').exists() or any((d / n).exists() for n in lib_names):
+        if (d / 'engine.c').exists():
             return d
+        for pat in _LIB_GLOBS:
+            if next(d.glob(pat), None) is not None:
+                return d
     return here / 'orca'
 
 
 _ENGINE_DIR = _find_engine_dir()
 _ENGINE_SRC = _ENGINE_DIR / 'engine.c'
+# Default name for the runtime-compiled fallback; the actual loaded library
+# may be a setuptools-built binary discovered by ``_find_prebuilt_lib``.
 _ENGINE_LIB = _ENGINE_DIR / f'engine{_LIB_EXT}'
 _lib = None
 
 
 def _find_prebuilt_lib() -> Optional[Path]:
-    """Return any pre-built engine shared library in the engine dir, regardless
-    of which platform-specific extension it uses. Lets a wheel that ships a
-    pre-compiled binary be loaded without a recompile."""
-    for name in ('engine.so', 'engine.dll', 'engine.dylib'):
+    """Return a pre-built engine shared library in the engine dir, if any.
+
+    Two flavours of binary may be present:
+
+      * **Wheel-shipped binaries** named like ``_engine.cpython-312-darwin.so``
+        or ``_engine.cp312-win_amd64.pyd`` -- produced by setuptools'
+        ``Extension`` mechanism (driven by ``setup.py`` + cibuildwheel in CI).
+        These are trusted unconditionally because they only exist if a wheel
+        bundled them; pip-extraction mtimes are not reliable enough to
+        compare against the ``engine.c`` source.
+
+      * **Generic runtime-compiled binaries** named ``engine.so`` /
+        ``engine.dll`` / ``engine.dylib`` -- produced by
+        :func:`_compile_engine` on first import when no wheel binary is
+        available. These *are* mtime-checked against ``engine.c`` so a dev
+        editing the C source gets a fresh recompile next run.
+
+    Prefers a wheel-shipped binary if both are present (the wheel one was
+    built specifically for this Python interpreter and platform).
+    """
+    # Wheel-shipped (always trust)
+    for pat in ('_engine*.so', '_engine*.pyd', '_engine*.dylib',
+                'engine.cpython-*.so', 'engine.cpython-*.pyd',
+                'engine.cp*.pyd', 'engine.*.dylib'):
+        match = next(_ENGINE_DIR.glob(pat), None)
+        if match is not None:
+            return match
+
+    # Generic runtime-compiled (mtime-gated against engine.c)
+    for name in (f'engine{_LIB_EXT}', 'engine.so', 'engine.dll', 'engine.dylib'):
         p = _ENGINE_DIR / name
-        if p.exists():
+        if not p.exists():
+            continue
+        if not _ENGINE_SRC.exists() or p.stat().st_mtime >= _ENGINE_SRC.stat().st_mtime:
             return p
     return None
 
@@ -145,15 +185,14 @@ def _compile_engine():
     """
     global _ENGINE_LIB
 
-    # 1. Pre-built binary already there?  (Wheel shipped one, or we compiled
-    # earlier.) Anything matching engine.so/.dll/.dylib counts -- this lets a
-    # wheel built with cibuildwheel ship a pre-compiled binary that's used
-    # without a recompile.
+    # 1. Pre-built binary already there?  (Wheel shipped one via cibuildwheel,
+    # or we compiled earlier.) ``_find_prebuilt_lib`` already handles the
+    # logic of "trust wheel binaries unconditionally, mtime-gate generic
+    # engine.so against engine.c", so we just take whatever it returns.
     prebuilt = _find_prebuilt_lib()
     if prebuilt is not None:
-        if not _ENGINE_SRC.exists() or prebuilt.stat().st_mtime >= _ENGINE_SRC.stat().st_mtime:
-            _ENGINE_LIB = prebuilt
-            return
+        _ENGINE_LIB = prebuilt
+        return
 
     if not _ENGINE_SRC.exists():
         raise FileNotFoundError(
