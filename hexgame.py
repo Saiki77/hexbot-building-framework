@@ -40,7 +40,25 @@ __all__ = ['HexGame']
 # C Engine loader (auto-compiles if needed)
 # ---------------------------------------------------------------------------
 
-_ENGINE_DIR = Path(__file__).parent
+def _find_engine_dir() -> Path:
+    """Locate the directory that contains engine.c / engine.so.
+
+    Order of preference:
+      1. ``orca/`` sibling of this file - this is where the engine ships
+         in the pip-installed wheel (and where dev checkouts also keep it).
+      2. The same directory as this file - legacy layout from before the
+         engine was moved into the orca package.
+    """
+    here = Path(__file__).resolve().parent
+    candidates = [here / 'orca', here]
+    for d in candidates:
+        if (d / 'engine.c').exists() or (d / 'engine.so').exists():
+            return d
+    # Default to the orca subdir so error messages point at the new layout.
+    return candidates[0]
+
+
+_ENGINE_DIR = _find_engine_dir()
 _ENGINE_SRC = _ENGINE_DIR / 'engine.c'
 _ENGINE_LIB = _ENGINE_DIR / 'engine.so'
 _lib = None
@@ -52,13 +70,22 @@ def _compile_engine():
         if _ENGINE_LIB.stat().st_mtime >= _ENGINE_SRC.stat().st_mtime:
             return  # up to date
     if not _ENGINE_SRC.exists():
-        raise FileNotFoundError(f"engine.c not found at {_ENGINE_SRC}")
+        raise FileNotFoundError(
+            f"engine.c not found at {_ENGINE_SRC}. "
+            f"If you installed via pip, please reinstall: pip install --force-reinstall hexbot"
+        )
     print(f"Compiling {_ENGINE_SRC.name}...", file=sys.stderr)
-    subprocess.run(
-        ['cc', '-O3', '-march=native', '-shared', '-fPIC',
-         '-o', str(_ENGINE_LIB), str(_ENGINE_SRC)],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ['cc', '-O3', '-march=native', '-shared', '-fPIC',
+             '-o', str(_ENGINE_LIB), str(_ENGINE_SRC)],
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        raise RuntimeError(
+            f"Failed to compile {_ENGINE_SRC}. A C compiler (cc/gcc/clang) is required. "
+            f"Original error: {e}"
+        ) from e
 
 
 def _load_engine():
@@ -72,6 +99,16 @@ def _load_engine():
     _lib = ctypes.CDLL(str(_ENGINE_LIB))
     _setup_signatures(_lib)
     return _lib
+
+
+def get_engine_path() -> Path:
+    """Return the path to the loaded engine.so (compiling it first if needed).
+
+    Useful for other modules that need to load the C engine directly (e.g.
+    with their own ctypes signatures) without going through HexGame.
+    """
+    _load_engine()
+    return _ENGINE_LIB
 
 
 def _setup_signatures(lib):

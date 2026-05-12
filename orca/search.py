@@ -190,9 +190,15 @@ class MCTS:
         """Expand node using NN with progressive widening.
         Only creates top-K children initially. More are added as visits increase.
         This forces the tree DEEPER instead of wider - key for multi-move lookahead."""
-        encoded, oq, orr = encode_state(game)
-        policy_logits, value = self.net.predict(encoded)
-        policy = decode_policy(policy_logits, game, oq, orr)
+        # Auto-detect CGameState vs HexGame for correct encoder
+        if hasattr(game, '_ptr'):  # CGameState
+            encoded, oq, orr = c_encode_state(game)
+            policy_logits, value = self.net.predict(encoded)
+            policy = c_decode_policy(policy_logits, game, oq, orr)
+        else:
+            encoded, oq, orr = encode_state(game)
+            policy_logits, value = self.net.predict(encoded)
+            policy = decode_policy(policy_logits, game, oq, orr)
 
         # Quiescence boost: if position has double/triple threats, adjust value
         try:
@@ -317,11 +323,9 @@ class NNAlphaBeta:
 
     def _setup_c_engine(self):
         """Load C engine library."""
-        import os
-        lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'engine.so')
-        if not os.path.exists(lib_path):
-            raise RuntimeError(f"C engine not found at {lib_path}")
-        self._lib = ctypes.CDLL(lib_path)
+        from hexgame import get_engine_path
+        lib_path = get_engine_path()
+        self._lib = ctypes.CDLL(str(lib_path))
 
         # Board allocation
         board_size = self._lib.board_sizeof()
