@@ -78,10 +78,16 @@ class PrintObserver:
     def on_game_complete(self, game_idx: int, total_games: int,
                          move_history: list, result: float,
                          num_samples: int,
-                         analysis_data: list = None) -> None:
+                         analysis_data: list = None,
+                         game_type: str = 'selfplay',
+                         orca_result: float = None) -> None:
         winner = "P0" if result > 0 else ("P1" if result < 0 else "draw")
+        tag = f" [{game_type}]" if game_type != 'selfplay' else ""
+        if game_type == 'vs_ramora' and orca_result is not None:
+            who = "Orca" if orca_result > 0 else ("SealBot" if orca_result < 0 else "draw")
+            tag = f" [vs SealBot: {who} wins]"
         print(f"  |  Game {game_idx}/{total_games}: {winner} "
-              f"in {len(move_history)} moves ({num_samples} samples)")
+              f"in {len(move_history)} moves ({num_samples} samples){tag}")
 
     def on_iteration_complete(self, metrics: dict) -> None:
         loss = metrics.get("loss", {})
@@ -149,7 +155,8 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
         from bot import (CGameState, BatchedMCTS, BatchedNNAlphaBeta,
                          self_play_game_v2, create_network,
                          migrate_checkpoint_5to7, migrate_checkpoint_filters)
-    except ImportError:
+    except ImportError as e:
+        print(f"  |  FATAL: Worker import failed: {e}")
         return []
 
     import time as _time, os as _os
@@ -165,7 +172,7 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
     net.load_state_dict(migrated, strict=False)
     net.eval()
 
-    # Try to use MPS in subprocess (much faster than CPU)
+    # Try GPU in subprocess (MPS/CUDA much faster than CPU)
     _dev = 'cpu'
     try:
         if _torch.backends.mps.is_available():
@@ -174,7 +181,7 @@ def _self_play_worker_v2(net_state_dict: dict, net_config: str, num_sims: int,
     except Exception:
         pass
     try:
-        if _torch.cuda.is_available():
+        if _dev == 'cpu' and _torch.cuda.is_available():
             net = net.to('cuda')
             _dev = 'cuda'
     except Exception:
@@ -378,6 +385,29 @@ class GenerationalArena:
             matchups["vs_heuristic"] = {"w": w_heur, "l": l_heur, "d": 0}
             total_wins += w_heur; total_losses += l_heur
 
+        # 4. Play against SealBot (anchored at ~1200 ELO + survival bonus)
+        # 4. Play against SealBot
+        w_ramora = l_ramora = 0
+        avg_survival = 0
+        try:
+            from orca.config import ELO_SEALBOT_GAMES
+            n_seal = ELO_SEALBOT_GAMES if ELO_SEALBOT_GAMES > 0 else 0
+            if n_seal > 0:
+                # Temporarily override baseline_games for SealBot count
+                old_bg = self.baseline_games
+                self.baseline_games = n_seal
+                w_ramora, l_ramora, avg_survival = self._play_vs_ramora(mcts_cur)
+                self.baseline_games = old_bg
+                matchups["vs_ramora"] = {
+                    "w": w_ramora, "l": l_ramora, "d": 0,
+                    "avg_survival": round(avg_survival, 1),
+                }
+                total_wins += w_ramora; total_losses += l_ramora
+                print(f"  |  vs SealBot: {w_ramora}W/{l_ramora}L "
+                      f"avg_survival={avg_survival:.0f} moves")
+        except Exception as e:
+            print(f"  |  SealBot eval skipped: {e}")
+
         self.matchup_history.append(matchups)
 
         # Compute ELO from combined results
@@ -397,8 +427,19 @@ class GenerationalArena:
             heur_wr = max(0.05, min(0.95, heur_wr))
             rand_elo = 500 + 400 * math.log10(rand_wr / (1 - rand_wr))
             heur_elo = 1000 + 400 * math.log10(heur_wr / (1 - heur_wr))
-            # Blend: 60% generational + 20% random-anchored + 20% heuristic-anchored
-            new_elo = 0.6 * gen_elo + 0.2 * rand_elo + 0.2 * heur_elo
+
+            if w_ramora + l_ramora > 0:
+                # Survival-based scoring: even losing, surviving longer = progress
+                # Win = 1.0, Loss with 50+ moves = 0.3, Loss with 30 moves = 0.15
+                survival_bonus = min(avg_survival / 150.0, 0.4) if avg_survival > 0 else 0
+                ramora_wr = w_ramora / max(w_ramora + l_ramora, 1)
+                # Add survival bonus: losing at 50 moves counts as ~0.3 instead of 0
+                effective_wr = ramora_wr + (1 - ramora_wr) * survival_bonus
+                effective_wr = max(0.05, min(0.95, effective_wr))
+                ramora_elo = 1200 + 400 * math.log10(effective_wr / (1 - effective_wr))
+                new_elo = 0.5 * gen_elo + 0.15 * rand_elo + 0.15 * heur_elo + 0.2 * ramora_elo
+            else:
+                new_elo = 0.6 * gen_elo + 0.2 * rand_elo + 0.2 * heur_elo
         else:
             new_elo = gen_elo
 
@@ -406,9 +447,10 @@ class GenerationalArena:
 
     def _play_vs_baseline(self, mcts_cur, baseline_type: str):
         """Play against a baseline bot. Returns (wins, losses)."""
+        from orca.encoding import CGameState
         wins = losses = 0
         for g in range(self.baseline_games):
-            game = HexGame(candidate_radius=2, max_total_stones=200)
+            game = CGameState(max_total_stones=200)
             cur_is_p0 = (g % 2 == 0)
             while not game.is_terminal:
                 if (game.current_player == 0) == cur_is_p0:
@@ -431,16 +473,37 @@ class GenerationalArena:
                             else:
                                 candidates = game.legal_moves()
                                 best = candidates[0] if candidates else (0, 0)
-                        except Exception:
+                        except Exception as e:
+                            print(f"  |  WARN: Heuristic baseline error: {e}")
                             candidates = game.legal_moves()
                             best = candidates[0] if candidates else (0, 0)
                 game.place_stone(*best)
-            result = game.result()
+            result = game.result_for(0)  # from P0 perspective
             if not cur_is_p0:
-                result = -result
+                result = -result  # flip if current model was P1
             if result > 0: wins += 1
             elif result < 0: losses += 1
         return wins, losses
+
+    def _play_vs_ramora(self, mcts_cur):
+        """Play against SealBot. Returns (wins, losses, avg_survival).
+        avg_survival = average game length when losing (higher = better defense).
+        """
+        from opponents.ramora.adapter import play_match, create_ramora_bot
+        from orca.config import RAMORA_TIME_LIMIT
+        ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
+        wins = losses = 0
+        survival_moves = []
+        for g in range(self.baseline_games):
+            orca_first = (g % 2 == 0)
+            result = play_match(mcts_cur, None, ramora, orca_plays_first=orca_first)
+            if result['winner'] == 'orca':
+                wins += 1
+            elif result['winner'] == 'ramora':
+                losses += 1
+                survival_moves.append(result['num_moves'])
+        avg_survival = sum(survival_moves) / max(len(survival_moves), 1)
+        return wins, losses, avg_survival
 
     def _select_opponents(self, n: int) -> list:
         if n <= self.max_opponents:
@@ -452,7 +515,8 @@ class GenerationalArena:
         return sorted(selected)
 
     def _play(self, mcts_p0: MCTS, mcts_p1: MCTS) -> float:
-        game = HexGame(candidate_radius=2, max_total_stones=200)
+        from orca.encoding import CGameState
+        game = CGameState(max_total_stones=200)
         while not game.is_terminal:
             mcts = mcts_p0 if game.current_player == 0 else mcts_p1
             policy = mcts.search(game, temperature=0.1, add_noise=False)
@@ -460,7 +524,7 @@ class GenerationalArena:
                 break
             best = max(policy, key=policy.get)
             game.place_stone(*best)
-        return game.result()
+        return game.result_for(0)  # +1 if P0 won, -1 if P1 won, 0 draw
 
 
 # ---------------------------------------------------------------------------
@@ -477,13 +541,13 @@ class AutoTuner:
         self.decisions: list = []
 
         self.params = {
-            "lr": 0.002,
+            "lr": 0.001,
             "sims": 10,
-            "mix_normal": 1.00,
-            "mix_catalog": 0.00,
-            "mix_endgame": 0.00,
-            "mix_formation": 0.00,
-            "mix_sequence": 0.00,
+            "mix_normal": 0.60,
+            "mix_catalog": 0.05,
+            "mix_endgame": 0.15,
+            "mix_formation": 0.15,
+            "mix_sequence": 0.05,
             "hint_blend": 0.3,
             "temp_threshold": 20,
             "train_steps": 200,
@@ -512,12 +576,13 @@ class AutoTuner:
             p["sims"] = 50
             changes.append("sims->50 (training cap)")
 
-        # Game mix: pure self-play (locked)
-        p["mix_normal"] = 1.0
-        p["mix_endgame"] = 0.0
-        p["mix_catalog"] = 0.0
-        p["mix_formation"] = 0.0
-        p["mix_sequence"] = 0.0
+        # Game mix: include tactical positions from the start
+        # Endgame/formation positions force blocking and advanced patterns
+        p["mix_normal"] = 0.60
+        p["mix_endgame"] = 0.15
+        p["mix_catalog"] = 0.05
+        p["mix_formation"] = 0.15
+        p["mix_sequence"] = 0.05
 
         # Hint blend: decay over time
         p["hint_blend"] = max(0.0, 0.3 - iteration * 0.015)
@@ -526,8 +591,8 @@ class AutoTuner:
         buf_fill = metrics.get("buffer_fill", 0)
         loss_decreasing = (len(self.loss_history) >= 3 and
                            self.loss_history[-1] < self.loss_history[-3] * 0.95)
-        if buf_fill > 0.9 and loss_decreasing and p["train_steps"] < 600:
-            p["train_steps"] = min(600, p["train_steps"] + 50)
+        if buf_fill > 0.9 and loss_decreasing and p["train_steps"] < 300:
+            p["train_steps"] = min(300, p["train_steps"] + 50)
             changes.append(f"train_steps->{p['train_steps']}")
 
         if changes:
@@ -817,22 +882,114 @@ class OrcaTrainer:
             self.net.to(self.device)
             print(f"  |  ONNX export: {time.perf_counter() - t_exp:.1f}s")
 
-            # Build position mix
-            all_positions = self._build_position_mix(
-                current_games, auto_tuner.params)
+            # Split games: SealBot (90%) + self-play (10%)
+            collected_samples = []
+            total_samples = 0
+            try:
+                from orca.config import RAMORA_GAME_FRACTION
+                n_ramora = max(1, int(current_games * RAMORA_GAME_FRACTION))
+                selfplay_games = max(5, current_games - n_ramora)
+            except ImportError:
+                n_ramora = 0
+                selfplay_games = current_games
 
-            # -- Self-play ---------------------------------------------------
+            # -- PARALLEL: Train on GPU + SealBot games on CPU -----------------
+            # Training uses self.net on GPU. SealBot games use a COPY on CPU.
+            # They run simultaneously — GPU trains while SealBot's C++ thinks.
+            losses = {"total": 0, "value": 0, "policy": 0}
+            train_time = 0
+            actual_steps = auto_tuner.params.get("train_steps", self.train_steps)
+
+            # Start SealBot games in background thread
+            # Uses a cloned network so training can run simultaneously
+            t_ramora_start = time.perf_counter()
+            seal_thread = None
+            seal_result = [None]
+            if n_ramora > 0:
+                seal_net = create_network(self.net_config)
+                # Strip _orig_mod. prefix from torch.compile() state dicts
+                sd = {k.replace('_orig_mod.', ''): v for k, v in self.net.state_dict().items()}
+                seal_net.load_state_dict(sd, strict=False)
+                seal_net.to(self.device)
+                seal_net.eval()
+
+                # Save/restore self.net so _play_vs_ramora_batch uses the clone
+                _orig_net = self.net
+                def _seal_worker():
+                    try:
+                        self.net = seal_net
+                        result = self._play_vs_ramora_batch(
+                            n_ramora, current_sims, replay_buffer, collected_samples)
+                        seal_result[0] = result
+                    except Exception as e:
+                        print(f"  |  SealBot thread error: {e}")
+                        import traceback; traceback.print_exc()
+                        seal_result[0] = {'wins': 0, 'losses': 0, 'draws': 0, 'samples': 0}
+                    finally:
+                        self.net = _orig_net
+
+                seal_thread = threading.Thread(target=_seal_worker, daemon=True)
+                seal_thread.start()
+
+            # GPU training runs while SealBot plays in background
+            if len(replay_buffer) >= BATCH_SIZE:
+                print(f"  |  Training: {actual_steps} steps on {self.device} "
+                      f"(batch={BATCH_SIZE}, buffer={len(replay_buffer)})...")
+                t1 = time.perf_counter()
+                self.net.train()
+                for step in range(actual_steps):
+                    losses = train_step(
+                        self.net, optimizer, replay_buffer, self.device,
+                        grad_scaler=grad_scaler)
+                    if (step + 1) % 50 == 0:
+                        elapsed = time.perf_counter() - t1
+                        print(f"  |    step {step+1}/{actual_steps} "
+                              f"loss={losses['total']:.4f} "
+                              f"({elapsed:.0f}s, {(step+1)/elapsed:.1f} steps/s)")
+                train_time = time.perf_counter() - t1
+                sps = actual_steps / train_time if train_time > 0 else 0
+                scheduler.step()
+                self._last_policy_loss = losses.get('policy', 99.0)
+                soft_mode = "SOFT" if self._last_policy_loss < 3.0 else "ONE-HOT"
+                print(f"  |  Training done: {train_time:.1f}s ({sps:.0f} steps/s) "
+                      f"loss={losses['total']:.4f} "
+                      f"(v={losses['value']:.4f} p={losses['policy']:.4f}) "
+                      f"lr={optimizer.param_groups[0]['lr']:.6f} "
+                      f"[policy targets: {soft_mode}]")
+            else:
+                print(f"  |  Training skipped: buffer too small "
+                      f"({len(replay_buffer)}<{BATCH_SIZE})")
+
+            # Wait for SealBot thread to finish
+            if seal_thread is not None:
+                seal_thread.join(timeout=900)  # 15 min max
+                sr = seal_result[0]
+                if sr:
+                    # Samples already pushed to replay_buffer by _play_vs_ramora_batch
+                    total_samples += sr.get('samples', 0)
+                    self.metrics.setdefault('ramora_wins', 0)
+                    self.metrics.setdefault('ramora_losses', 0)
+                    self.metrics.setdefault('ramora_draws', 0)
+                    self.metrics['ramora_wins'] += sr.get('wins', 0)
+                    self.metrics['ramora_losses'] += sr.get('losses', 0)
+                    self.metrics['ramora_draws'] += sr.get('draws', 0)
+            self._last_ramora_time = time.perf_counter() - t_ramora_start
+
+            # -- Self-play (small batch, parallel workers) --------------------
+            all_positions = self._build_position_mix(
+                selfplay_games, auto_tuner.params)
+
             t_sp = time.perf_counter()
             sp_result = self._run_self_play(
-                use_v2, current_sims, current_games, all_positions,
+                use_v2, current_sims, selfplay_games, all_positions,
                 onnx_path, replay_buffer)
             t_selfplay = time.perf_counter() - t_sp
 
             game_idx = sp_result["game_idx"]
-            total_samples = sp_result["total_samples"]
+            total_samples += sp_result["total_samples"]
             total_moves = sp_result["total_moves"]
             wins = sp_result["wins"]
-            collected_samples = sp_result["collected_samples"]
+            collected_samples.extend(sp_result["collected_samples"])
 
             gps = game_idx / t_selfplay if t_selfplay > 0 else 0
             print(f"  |  Self-play done: {game_idx} games, "
@@ -857,69 +1014,49 @@ class OrcaTrainer:
 
             sp_time = time.perf_counter() - t0
 
-            # -- GPU training ------------------------------------------------
-            losses = {"total": 0, "value": 0, "policy": 0}
-            train_time = 0
-            actual_steps = auto_tuner.params.get("train_steps", self.train_steps)
-            if len(replay_buffer) >= BATCH_SIZE:
-                print(f"  |  Training: {actual_steps} steps on {self.device} "
-                      f"(batch={BATCH_SIZE}, buffer={len(replay_buffer)})...")
-                t1 = time.perf_counter()
-                self.net.train()
-                for step in range(actual_steps):
-                    losses = train_step(
-                        self.net, optimizer, replay_buffer, self.device,
-                        grad_scaler=grad_scaler)
-                train_time = time.perf_counter() - t1
-                sps = actual_steps / train_time if train_time > 0 else 0
-                scheduler.step()
-                current_lr = optimizer.param_groups[0]["lr"]
-                auto_tuner.params["lr"] = current_lr
-                print(f"  |  Training done: {train_time:.1f}s ({sps:.0f} steps/s) "
-                      f"loss={losses['total']:.4f} "
-                      f"(v={losses['value']:.4f} p={losses['policy']:.4f}) "
-                      f"lr={current_lr:.6f}")
-            else:
-                print(f"  |  Training skipped: buffer too small "
-                      f"({len(replay_buffer)}<{BATCH_SIZE})")
-
-            # -- ELO evaluation (every N iterations) --------------------------
             elo_str = ""
-            if len(replay_buffer) >= BATCH_SIZE and (iteration + 1) % self.elo_every == 0:
-                self.model_vault.add(iteration + 1, self.net.state_dict())
+
+            # -- ELO evaluation ------------------------------
+            # Always add to vault (even if eval is running)
+            self.model_vault.add(iteration + 1, self.net.state_dict())
+
+            # -- ELO evaluation (synchronous — MPS can't do background inference)
+            if (len(replay_buffer) >= BATCH_SIZE
+                    and (iteration + 1) % self.elo_every == 0
+                    and len(self.model_vault) > 1):
                 n_opp = min(self.arena.max_opponents,
                             len(self.model_vault) - 1)
-                n_eval_games = n_opp * self.arena.games_per_opponent
+                n_eval_games = (n_opp * self.arena.games_per_opponent
+                               + self.arena.baseline_games * 2)  # +random +heuristic
                 print(f"  |  ELO evaluation ({n_eval_games} games vs "
-                      f"{n_opp} generations, vault={len(self.model_vault)})...")
+                      f"{n_opp} generations + baselines, "
+                      f"vault={len(self.model_vault)})...")
                 t_elo = time.perf_counter()
-                new_elo = self.arena.evaluate(
-                    self.net, self.model_vault, self.metrics["current_elo"])
-                t_elo = time.perf_counter() - t_elo
-                delta = new_elo - self.metrics["current_elo"]
-                sign = "+" if delta >= 0 else ""
-                self.metrics["current_elo"] = new_elo
-                self.metrics["elo_history"].append(
-                    {"iteration": iteration + 1, "elo": round(new_elo, 1)})
-                update_curriculum_plateau(new_elo)
-                elo_str = f" | ELO {new_elo:.0f} ({sign}{delta:.0f})"
-                stall = (f" stall={_curriculum_stall_iters}"
-                         if _curriculum_stall_iters > 0 else "")
+                try:
+                    self.net.eval()
+                    new_elo = self.arena.evaluate(
+                        self.net, self.model_vault, self.metrics["current_elo"])
+                    delta = new_elo - self.metrics["current_elo"]
+                    sign = "+" if delta >= 0 else ""
+                    self.metrics["current_elo"] = new_elo
+                    self.metrics["elo_history"].append(
+                        {"iteration": iteration + 1, "elo": round(new_elo, 1)})
+                    update_curriculum_plateau(new_elo)
+                    elo_str = f" | ELO {new_elo:.0f} ({sign}{delta:.0f})"
+                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
+                          f"in {time.perf_counter() - t_elo:.1f}s")
 
-                # Checkpoint gating: only save best model
-                best = self.metrics.get("best_elo", 1000.0)
-                if new_elo > best:
-                    self.metrics["best_elo"] = new_elo
-                    self.metrics["best_iteration"] = iteration + 1
-                    torch.save({"model_state_dict": self.net.state_dict(),
-                                "iteration": iteration + 1, "elo": new_elo},
-                               "hex_best.pt")
-                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
-                          f"NEW BEST (saved hex_best.pt) {stall}")
-                else:
-                    print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
-                          f"(best: {best:.0f} @ iter {self.metrics.get('best_iteration', '?')}) "
-                          f"{stall}")
+                    best = self.metrics.get("best_elo", 1000.0)
+                    if new_elo > best:
+                        self.metrics["best_elo"] = new_elo
+                        self.metrics["best_iteration"] = iteration + 1
+                        torch.save({"model_state_dict": self.net.state_dict(),
+                                    "iteration": iteration + 1, "elo": new_elo},
+                                   "hex_best.pt")
+                        print(f"  |  NEW BEST ELO (saved hex_best.pt)")
+                except Exception as e:
+                    print(f"  |  ELO eval error: {e}")
+                    import traceback; traceback.print_exc()
 
             # -- Metrics & AutoTuner -----------------------------------------
             avg_len = total_moves / max(game_idx, 1)
@@ -938,6 +1075,9 @@ class OrcaTrainer:
                 "workers": self.num_workers,
                 "sims": current_sims,
                 "lr": round(optimizer.param_groups[0]["lr"], 5),
+                "ramora_wins": self.metrics.get("ramora_wins", 0),
+                "ramora_losses": self.metrics.get("ramora_losses", 0),
+                "ramora_draws": self.metrics.get("ramora_draws", 0),
             }
             self.metrics["iterations"].append(iter_metrics)
             self.metrics["total_games"] = self.metrics.get("total_games", 0) + game_idx
@@ -955,16 +1095,33 @@ class OrcaTrainer:
             for pg in optimizer.param_groups:
                 pg["lr"] = new_params["lr"]
 
-            print(f"  +-- Iter {iteration + 1} done: {total_time:.1f}s total "
+            # -- Detailed iteration summary ------------------------------------
+            import psutil
+            ram = psutil.virtual_memory()
+            mem_line = f"RAM {ram.percent}% ({ram.used/1e9:.1f}/{ram.total/1e9:.1f}GB)"
+            if self.device.type == 'cuda':
+                gpu_alloc = torch.cuda.memory_allocated() / 1e9
+                gpu_peak = torch.cuda.max_memory_allocated() / 1e9
+                gpu_total = getattr(torch.cuda.get_device_properties(0),
+                                    'total_memory', 0) / 1e9
+                mem_line += f" | GPU {gpu_alloc:.1f}/{gpu_total:.1f}GB (peak {gpu_peak:.1f}GB)"
+                torch.cuda.reset_peak_memory_stats()
+
+            t_ramora = getattr(self, '_last_ramora_time', 0)
+            print(f"  |  Buffer: {len(replay_buffer):,} samples | {mem_line}")
+            print(f"  |  Timing: ramora={t_ramora:.1f}s sp={t_selfplay:.1f}s "
+                  f"train={train_time:.1f}s total={total_time:.1f}s")
+            print(f"  +-- Iter {iteration + 1} done: {total_time:.1f}s "
                   f"| {game_idx} games | {total_samples} samples{elo_str}")
             print()
 
-            # -- Checkpoint (every 5 iterations) -----------------------------
-            if (iteration + 1) % 5 == 0:
+            # -- Checkpoint -------------------------------------------------------
+            from orca.config import CHECKPOINT_EVERY
+            if (iteration + 1) % CHECKPOINT_EVERY == 0:
                 self._save_checkpoint(
                     iteration, optimizer, scheduler, replay_buffer, auto_tuner)
 
-        # -- Done ------------------------------------------------------------
+
         print(f"\n{'=' * 60}")
         print(f"  TRAINING COMPLETE -- {self.num_iterations} iterations")
         print(f"  Final ELO: {self.metrics['current_elo']:.0f}")
@@ -1018,8 +1175,8 @@ class OrcaTrainer:
             if "scheduler_state_dict" in ckpt:
                 try:
                     scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"  |  WARN: Scheduler restore failed: {e}")
 
             # Restore replay buffer
             buf_path = os.path.join(os.path.dirname(resume_path),
@@ -1048,11 +1205,13 @@ class OrcaTrainer:
                 at = ckpt["auto_tuner"]
                 auto_tuner.params = at.get("params", auto_tuner.params)
                 auto_tuner.params["lr"] = optimizer.param_groups[0]["lr"]
-                auto_tuner.params["mix_normal"] = 1.0
-                auto_tuner.params["mix_catalog"] = 0.0
-                auto_tuner.params["mix_endgame"] = 0.0
-                auto_tuner.params["mix_formation"] = 0.0
-                auto_tuner.params["mix_sequence"] = 0.0
+                # Clamp train_steps to current cap
+                if auto_tuner.params.get("train_steps", 200) > 300:
+                    auto_tuner.params["train_steps"] = 300
+                # Keep the tactical mix — don't reset to 100% normal
+                auto_tuner.params.setdefault("mix_normal", 0.60)
+                auto_tuner.params.setdefault("mix_endgame", 0.15)
+                auto_tuner.params.setdefault("mix_formation", 0.15)
                 auto_tuner.loss_history = at.get("loss_history", [])
                 auto_tuner.elo_history = at.get("elo_history", [])
 
@@ -1099,8 +1258,175 @@ class OrcaTrainer:
                     collected_samples.append(s)
                 self._online_lines_read = new_pos
                 print(f"  |  Online games: +{len(online_samples)} samples")
-        except Exception:
-            pass
+        except Exception as e:
+            if str(e):
+                print(f"  |  WARN: Online games load failed: {e}")
+
+    def _play_vs_ramora_batch(self, n_games: int, current_sims: int,
+                              replay_buffer: ReplayBuffer,
+                              collected_samples: list) -> dict:
+        """Play games against SealBot and collect rich training samples.
+
+        Collects samples from BOTH players:
+        - Orca moves: soft MCTS distribution as policy target
+        - SealBot moves: expert demonstration (one-hot, lower priority)
+
+        Uses temporal value decay so the value head learns which positions
+        are more dangerous (not flat -1.0 for every position in a loss).
+        """
+        from opponents.ramora.adapter import create_ramora_bot, play_match
+        from orca.config import RAMORA_TIME_LIMIT, BLOCKING_PRIORITY_BOOST
+        from orca.search import BatchedMCTS
+        from orca.encoding import CGameState, c_encode_state, c_compute_threat_label
+        from orca.data import TrainingSample
+        import numpy as np
+
+        self.net.eval()
+        # Use full sims — at 50 sims MCTS is blind (2 plies), producing garbage data
+        seal_sims = current_sims
+        mcts = BatchedMCTS(self.net, num_simulations=seal_sims, batch_size=64)
+        ramora = create_ramora_bot(time_limit=RAMORA_TIME_LIMIT)
+        print(f"  |  SealBot games: {n_games} games, {seal_sims} sims, "
+              f"{RAMORA_TIME_LIMIT}s/move for SealBot")
+
+        wins = losses = draws = 0
+        total_samp = 0
+        t0 = time.perf_counter()
+        GAMMA = 0.99  # gentle temporal value decay (0.97 was too aggressive)
+
+        for i in range(n_games):
+            if self.observer.should_stop():
+                break
+            orca_first = (i % 2 == 0)
+            result = play_match(mcts, self.net, ramora, orca_plays_first=orca_first)
+
+            game = CGameState(max_total_stones=200)
+            moves = result['moves']
+            orca_policies = result.get('orca_policies', [])
+            orca_policy_idx = 0
+            n_moves = len(moves)
+
+            # Base game result
+            orca_won = result['winner'] == 'orca'
+            base_orca_result = 1.0 if orca_won else (-1.0 if result['winner'] == 'ramora' else 0.0)
+
+            samples = []
+            for idx, (who, q, r) in enumerate(moves):
+                enc, oq, orr = c_encode_state(game)
+                threat = c_compute_threat_label(game)
+
+                # Temporal value decay: positions far from end get weaker signal
+                distance_from_end = n_moves - idx
+                decay = GAMMA ** distance_from_end
+
+                if who == 'orca':
+                    # --- Orca's move ---
+                    # Auto-switch: one-hot when loss is high (random network),
+                    # soft MCTS distribution once network has basic patterns.
+                    use_soft = (hasattr(self, '_last_policy_loss') and
+                                self._last_policy_loss < 3.0 and
+                                orca_policy_idx < len(orca_policies) and
+                                orca_policies[orca_policy_idx])
+
+                    policy_target = np.zeros(19 * 19, dtype=np.float32)
+                    if use_soft:
+                        # Soft MCTS distribution (better signal once network is trained)
+                        for (mq, mr), prob in orca_policies[orca_policy_idx].items():
+                            mi, mj = mq - oq, mr - orr
+                            if 0 <= mi < 19 and 0 <= mj < 19:
+                                policy_target[mi * 19 + mj] = prob
+                        s = policy_target.sum()
+                        if s > 1e-6:
+                            policy_target /= s
+                        else:
+                            policy_target = np.zeros(19 * 19, dtype=np.float32)
+                            iq, ir = q - oq, r - orr
+                            if 0 <= iq < 19 and 0 <= ir < 19:
+                                policy_target[iq * 19 + ir] = 1.0
+                    else:
+                        # One-hot (safe for random/early network)
+                        iq, ir = q - oq, r - orr
+                        if 0 <= iq < 19 and 0 <= ir < 19:
+                            policy_target[iq * 19 + ir] = 1.0
+                    if orca_policy_idx < len(orca_policies):
+                        orca_policy_idx += 1
+
+                    # Recency-weighted priority (late game matters more)
+                    recency = (idx + 1) / max(n_moves, 1)
+                    priority = 1.0 + 2.0 * recency  # 1.0 early → 3.0 late
+
+                    s = TrainingSample(
+                        encoded_state=enc,
+                        policy_target=policy_target,
+                        player=game.current_player,
+                        result=max(-1.0, min(1.0, base_orca_result * decay)),
+                        threat_label=threat,
+                        priority=priority,
+                    )
+                    samples.append(s)
+                    replay_buffer.push(s)
+                    collected_samples.append(s)
+
+                else:
+                    # --- SealBot's move: skip for now ---
+                    # Expert demo samples disabled until loss stabilizes.
+                    # They may confuse the value head with mixed perspectives.
+                    # TODO: re-enable once loss < 3.0 (same auto-switch as soft targets)
+                    pass
+
+                game.place_stone(q, r)
+
+            # --- Hindsight priority boost: find critical blocking moments ---
+            try:
+                game2 = CGameState(max_total_stones=200)
+                prev_orca_sample_idx = None
+                for idx, (who, q, r) in enumerate(moves):
+                    if who == 'orca':
+                        prev_orca_sample_idx = idx
+                    elif who == 'ramora' and prev_orca_sample_idx is not None:
+                        # After SealBot moves, check if it created threats
+                        game2.place_stone(q, r)
+                        seal_player = game2._lib.board_get_current_player(game2._ptr)
+                        # Check threats BEFORE this move (seal's move created them)
+                        wm = game2._lib.board_count_winning_moves(
+                            game2._ptr, 1 - seal_player)
+                        if wm >= 2:
+                            # SealBot created 2+ threats — preceding Orca move was critical
+                            for s in samples:
+                                if hasattr(s, '_move_idx') and s._move_idx == prev_orca_sample_idx:
+                                    s.priority = max(s.priority, BLOCKING_PRIORITY_BOOST)
+                        continue
+                    game2.place_stone(q, r)
+            except Exception:
+                pass  # hindsight boost is optional
+
+            total_samp += len(samples)
+            w = result['winner']
+            if w == 'orca': wins += 1
+            elif w == 'ramora': losses += 1
+            else: draws += 1
+
+            # Emit for dashboard
+            move_list = [(q, r) for _, q, r in moves]
+            if w == 'orca':
+                result_val = 1.0 if orca_first else -1.0
+            elif w == 'ramora':
+                result_val = -1.0 if orca_first else 1.0
+            else:
+                result_val = 0.0
+            orca_result_val = 1.0 if w == 'orca' else (-1.0 if w == 'ramora' else 0.0)
+            self.observer.on_game_complete(
+                game_idx=i + 1, total_games=n_games,
+                move_history=move_list, result=result_val,
+                num_samples=len(samples),
+                analysis_data=None,
+                game_type='vs_ramora',
+                orca_result=orca_result_val)
+
+        elapsed = time.perf_counter() - t0
+        print(f"  |  SealBot done: {n_games} games, {wins}W/{losses}L/{draws}D, "
+              f"{total_samp} samples ({elapsed:.1f}s)")
+        return {'wins': wins, 'losses': losses, 'draws': draws, 'samples': total_samp}
 
     def _build_position_mix(self, current_games: int,
                             params: dict) -> list:
@@ -1552,8 +1878,8 @@ All parameters default to values in orca/config.py. CLI args override config.
         try:
             import orca.config
             orca.config.USE_AB_HYBRID = False
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"WARN: Could not disable AB hybrid: {e}")
 
     trainer = OrcaTrainer(
         iterations=args.iterations,

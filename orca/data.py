@@ -103,11 +103,24 @@ class ReplayBuffer:
 
     def sample(self, batch_size: int) -> Tuple[List[TrainingSample], List[int]]:
         """Returns (samples, indices) for priority updating."""
-        n = min(batch_size, len(self.buffer))
-        priors = np.array(self.priorities, dtype=np.float64)
-        priors /= priors.sum()
-        indices = np.random.choice(len(self.buffer), size=n, replace=False, p=priors)
+        # Snapshot buffer and priorities to avoid race condition
+        # (SealBot thread may push samples concurrently)
         buf = list(self.buffer)
+        pri = list(self.priorities)
+        # Ensure same length (trim to shorter if race happened)
+        sz = min(len(buf), len(pri))
+        if sz == 0:
+            return [], []
+        buf = buf[:sz]
+        pri = pri[:sz]
+        n = min(batch_size, sz)
+        priors = np.array(pri, dtype=np.float64)
+        s = priors.sum()
+        if s > 0:
+            priors /= s
+        else:
+            priors = np.ones(sz, dtype=np.float64) / sz
+        indices = np.random.choice(sz, size=n, replace=False, p=priors)
         return [buf[i] for i in indices], indices.tolist()
 
     def update_priorities(self, indices: List[int], errors: List[float]) -> None:
@@ -922,15 +935,16 @@ def self_play_game_v2(
         # Let MCTS decide everything - no forced moves during training.
         policy = mcts.search(game, temperature=temperature, add_noise=add_noise)
         if not policy:
-            break
+            # MCTS failed (broken network?) — place random candidate to continue
+            cands = game.candidates if hasattr(game, 'candidates') else game.legal_moves()
+            if not cands:
+                break
+            policy = {cands[random.randint(0, len(cands) - 1)]: 1.0}
 
-        # --- DISTANT EXPLORATION: inject gap candidates into policy ---
-        # Read play style dynamically so dashboard changes take effect
-        try:
-            from orca.config import PLAY_STYLE as _ps, DISTANT_RANGE as _dr, DISTANT_EXPLORE_PROB as _dep
-        except ImportError:
-            _ps, _dr, _dep = PLAY_STYLE, DISTANT_RANGE, DISTANT_EXPLORE_PROB
-        if _ps == 'distant' and move_count < 15:
+        # --- DISTANT EXPLORATION: inject ONE gap candidate with small prob ---
+        # Subtle: only 1 stone, only 2% probability, only in first 10 moves
+        # This prevents throwing games by placing 3 random stones far away
+        if PLAY_STYLE == 'distant' and move_count < 10 and random.random() < 0.3:
             existing = _get_existing_stones(game)
             if existing and len(policy) > 0:
                 lo, hi = _dr
@@ -945,12 +959,8 @@ def self_play_game_v2(
                             if (cq, cr) not in existing and (cq, cr) not in policy:
                                 gap_candidates.append((cq, cr))
                 if gap_candidates:
-                    n_inject = min(3, len(gap_candidates))
-                    injected = random.sample(gap_candidates, n_inject)
-                    inject_each = 0.05 / n_inject
-                    for m in injected:
-                        policy[m] = inject_each
-                    # Renormalize so probabilities sum to exactly 1.0
+                    injected = random.choice(gap_candidates)
+                    policy[injected] = 0.02  # small probability, won't dominate
                     total = sum(policy.values())
                     if total > 0:
                         policy = {m: p / total for m, p in policy.items()}

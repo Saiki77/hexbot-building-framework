@@ -296,6 +296,9 @@ class MetricsStore:
                 'self_play_time': latest.get('self_play_time', 0),
                 'train_time': latest.get('train_time', 0),
                 'avg_game_length': latest.get('avg_game_length', 0),
+                'ramora_wins': latest.get('ramora_wins', 0),
+                'ramora_losses': latest.get('ramora_losses', 0),
+                'ramora_draws': latest.get('ramora_draws', 0),
             }
 
     def get_elo_history(self) -> List[dict]:
@@ -576,17 +579,23 @@ class DashboardObserver:
     def on_game_complete(self, game_idx: int, total_games: int,
                          move_history: list, result: float,
                          num_samples: int,
-                         analysis_data: list = None) -> None:
+                         analysis_data: list = None,
+                         game_type: str = 'selfplay',
+                         orca_result: float = None) -> None:
         data = {
             'game_idx': game_idx,
             'total_games': total_games,
             'result': result,
             'num_moves': len(move_history),
             'moves': move_history,
+            'game_type': game_type,
         }
+        if orca_result is not None:
+            data['orca_result'] = orca_result
         if analysis_data:
             data['analysis'] = analysis_data
-        print(f'  │   Emitting game_complete #{game_idx} with {len(move_history)} moves')
+        tag = f' [{game_type}]' if game_type != 'selfplay' else ''
+        print(f'  |  Emitting game_complete #{game_idx} with {len(move_history)} moves{tag}')
         self.sio.emit('game_complete', data)
 
     def on_iteration_complete(self, metrics: dict) -> None:
@@ -663,7 +672,23 @@ class TrainingManager:
             observer=self.observer,
             resume=True,
         )
-        self._trainer.run()
+        try:
+            self._trainer.run()
+        except Exception as e:
+            print(f"\n{'!'*60}")
+            print(f"  FATAL TRAINING CRASH: {e}")
+            print(f"{'!'*60}")
+            import traceback; traceback.print_exc()
+            # Emergency checkpoint
+            try:
+                import torch
+                torch.save({
+                    "model_state_dict": self._trainer.net.state_dict(),
+                    "elo": self._trainer.metrics.get("current_elo", 1000),
+                }, "hex_checkpoint_crash.pt")
+                print(f"  |  Emergency checkpoint saved: hex_checkpoint_crash.pt")
+            except Exception:
+                print(f"  |  Could not save emergency checkpoint")
 
         # Sync state back for dashboard access
         self.net = self._trainer.net
@@ -797,7 +822,7 @@ def api_elo():
     result = {
         'elo_history': metrics_store.get_elo_history(),
         'vault_size': len(training_mgr.model_vault) if training_mgr and training_mgr.model_vault else 0,
-        'matchups': training_mgr.arena.get_matchup_summary() if training_mgr and training_mgr.arena else {},
+        'matchups': training_mgr.arena.matchup_history[-1] if training_mgr and training_mgr.arena and training_mgr.arena.matchup_history else {},
     }
     return jsonify(result)
 
@@ -875,29 +900,188 @@ def api_gamelength():
     return jsonify(data)
 
 
-@app.route('/api/vs_ramora', methods=['POST'])
-def api_vs_ramora():
-    """Play a quick match vs Ramora and return result."""
-    if not training_mgr or not training_mgr.net:
-        return jsonify({'error': 'No model loaded'}), 400
-    try:
-        from opponents.ramora.adapter import play_match, create_ramora_bot
-        from orca.c_mcts import CMCTSSearch
-        net = training_mgr.net
-        net.eval()
-        mcts = CMCTSSearch(net, num_simulations=50, batch_size=50)
-        ramora = create_ramora_bot(time_limit=1.0)
-        # Play 2 games (1 as first, 1 as second)
-        wins = losses = draws = 0
-        for i in range(2):
-            r = play_match(mcts, net, ramora, orca_plays_first=(i == 0))
-            if r['winner'] == 'orca': wins += 1
-            elif r['winner'] == 'ramora': losses += 1
-            else: draws += 1
-        return jsonify({'wins': wins, 'losses': losses, 'draws': draws,
-                       'label': f'{wins}W/{losses}L/{draws}D'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+# ---------------------------------------------------------------------------
+# Interactive play: Human vs Orca / Human vs SealBot
+# ---------------------------------------------------------------------------
+_play_sessions = {}  # session_id -> {game, bot, bot_name, moves, human_player}
+
+
+@app.route('/api/play/start', methods=['POST'])
+def play_start():
+    """Start a new interactive game. body: {opponent: 'orca'|'sealbot', human_first: true}"""
+    data = request.json or {}
+    opponent = data.get('opponent', 'orca')
+    human_first = data.get('human_first', True)
+
+    from orca.encoding import CGameState
+    game = CGameState(max_total_stones=200)
+    session_id = str(id(game))
+
+    session = {
+        'game': game,
+        'opponent': opponent,
+        'moves': [],
+        'human_player': 0 if human_first else 1,
+        'game_over': False,
+        'winner': None,
+    }
+    _play_sessions[session_id] = session
+
+    # If bot goes first, make bot's move(s)
+    result = {'session_id': session_id, 'moves': [], 'game_over': False}
+    if not human_first:
+        bot_moves = _play_bot_move(session)
+        result['moves'] = bot_moves
+
+    return jsonify(result)
+
+
+@app.route('/api/play/move', methods=['POST'])
+def play_move():
+    """Human places a stone. body: {session_id, q, r}"""
+    data = request.json or {}
+    sid = data.get('session_id')
+    q, r = data.get('q', 0), data.get('r', 0)
+    session = _play_sessions.get(sid)
+    if not session or session['game_over']:
+        return jsonify({'error': 'No active game'}), 400
+
+    game = session['game']
+
+    # Validate: check if cell is occupied
+    occupied = set()
+    for _, mq, mr in session['moves']:
+        occupied.add((mq, mr))
+    if (q, r) in occupied:
+        return jsonify({'error': 'Cell already occupied', 'moves': []}), 400
+
+    # Check it's human's turn
+    current = game._lib.board_get_current_player(game._ptr)
+    if current != session['human_player']:
+        return jsonify({'error': 'Not your turn', 'moves': []}), 400
+
+    game.place_stone(q, r)
+    session['moves'].append(('human', q, r))
+    # Keep ramora game in sync (for SealBot)
+    if '_rgame' in session:
+        session['_rgame'].make_move(q, r)
+
+    result = {'moves': [{'who': 'human', 'q': q, 'r': r}], 'game_over': False}
+
+    if game.is_terminal:
+        session['game_over'] = True
+        w = game._lib.board_get_winner(game._ptr)
+        session['winner'] = 'human' if w == session['human_player'] else 'bot'
+        result['game_over'] = True
+        result['winner'] = session['winner']
+        return jsonify(result)
+
+    # Check if it's still human's turn (connect-6: may need second stone)
+    current_after = game._lib.board_get_current_player(game._ptr)
+    if current_after == session['human_player']:
+        result['need_second'] = True
+        return jsonify(result)
+
+    # Bot's turn — bot plays until it's human's turn again
+    bot_moves = _play_bot_move(session)
+    result['moves'].extend(bot_moves)
+    if session['game_over']:
+        result['game_over'] = True
+        result['winner'] = session['winner']
+    return jsonify(result)
+
+
+@app.route('/api/play/state', methods=['POST'])
+def play_state():
+    """Get current game state."""
+    data = request.json or {}
+    sid = data.get('session_id')
+    session = _play_sessions.get(sid)
+    if not session:
+        return jsonify({'error': 'No active game'}), 400
+    return jsonify({
+        'moves': [{'who': w, 'q': q, 'r': r} for w, q, r in session['moves']],
+        'game_over': session['game_over'],
+        'winner': session.get('winner'),
+        'opponent': session['opponent'],
+    })
+
+
+def _play_bot_move(session):
+    """Have the bot make its move(s). Returns list of {who, q, r} dicts."""
+    game = session['game']
+    opponent = session['opponent']
+    bot_player = 1 - session['human_player']
+    bot_moves = []
+
+    if opponent == 'sealbot':
+        try:
+            from opponents.ramora.adapter import create_ramora_bot
+            # MUST use SealBot's own game.py — the C++ does py::import("game")
+            # and checks Player.A identity. Different module = different objects = broken.
+            import importlib, sys as _sys
+            _sealbot_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                        'opponents', 'sealbot')
+            if _sealbot_dir not in _sys.path:
+                _sys.path.insert(0, _sealbot_dir)
+            _seal_game = importlib.import_module('game')
+            SealHexGame = _seal_game.HexGame
+            # Cache sealbot + game in session
+            if '_sealbot' not in session:
+                session['_sealbot'] = create_ramora_bot(time_limit=2.0)
+                session['_rgame'] = SealHexGame()
+                # Replay existing moves into ramora game
+                for who, q, r in session['moves']:
+                    session['_rgame'].make_move(q, r)
+            sealbot = session['_sealbot']
+            rgame = session['_rgame']
+            result = sealbot.get_move(rgame)
+            print(f"  |  SealBot raw result: {result}")
+            print(f"  |  SealBot depth={sealbot.last_depth} score={sealbot.last_score:.1f} nodes={sealbot._nodes}")
+            # Copy result — pybind11 list may be mutable
+            moves_to_play = list(result) if result else []
+            for m in moves_to_play:
+                if game.is_terminal:
+                    break
+                q, r = m[0], m[1]
+                print(f"  |  Applying SealBot move: ({q},{r})")
+                game.place_stone(q, r)
+                rgame.make_move(q, r)
+                session['moves'].append(('bot', q, r))
+                bot_moves.append({'who': 'bot', 'q': q, 'r': r})
+        except Exception as e:
+            print(f"  |  SealBot play error: {e}")
+            import traceback; traceback.print_exc()
+    else:
+        # Orca MCTS — play stones until it's human's turn again
+        if training_mgr and training_mgr.net:
+            from orca.search import BatchedMCTS
+            net = training_mgr.net
+            net.eval()
+            mcts = BatchedMCTS(net, num_simulations=200, batch_size=64)
+            # Play until current_player switches to human
+            for _ in range(3):  # max 2 stones + safety
+                if game.is_terminal:
+                    break
+                current = game._lib.board_get_current_player(game._ptr)
+                if current != bot_player:
+                    break  # it's human's turn now
+                policy = mcts.search(game, temperature=0.1, add_noise=False)
+                if not policy:
+                    break
+                best = max(policy, key=policy.get)
+                game.place_stone(best[0], best[1])
+                session['moves'].append(('bot', best[0], best[1]))
+                bot_moves.append({'who': 'bot', 'q': best[0], 'r': best[1]})
+        else:
+            print("  |  Orca play error: no model loaded (start training first)")
+
+    if game.is_terminal:
+        session['game_over'] = True
+        w = game._lib.board_get_winner(game._ptr)
+        session['winner'] = 'human' if w == session['human_player'] else ('bot' if w >= 0 else 'draw')
+
+    return bot_moves
 
 
 @app.route('/api/train/start', methods=['POST'])
@@ -1400,6 +1584,7 @@ body.dark #value-chart-wrap{border-color:#333}
     <div class="tab-bar">
       <span class="tab active" data-tab="charts" onclick="switchTab('charts')">Charts</span>
       <span class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</span>
+      <span class="tab" data-tab="play" onclick="switchTab('play')">Play</span>
     </div>
     <div id="tab-charts" class="tab-content" style="display:flex;flex-direction:column;overflow-y:auto;flex:1">
       <div class="chart-box" id="box-elo">
@@ -1610,6 +1795,28 @@ body.dark #value-chart-wrap{border-color:#333}
         </div>
       </div>
     </div>
+    <div id="tab-play" class="tab-content" style="display:none;overflow-y:auto;flex:1;padding:16px 20px">
+      <div style="font:bold 12px 'SF Mono',monospace;letter-spacing:2px;margin-bottom:16px;text-transform:uppercase">Play a Game</div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
+        <button onclick="startPlay('orca',true)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #000;background:#000;color:#fff;cursor:pointer;text-align:left">
+          vs Orca (you play first)
+        </button>
+        <button onclick="startPlay('orca',false)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #000;background:#fff;color:#000;cursor:pointer;text-align:left">
+          vs Orca (Orca plays first)
+        </button>
+        <button onclick="startPlay('sealbot',true)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #2563eb;background:#2563eb;color:#fff;cursor:pointer;text-align:left">
+          vs SealBot (you play first)
+        </button>
+        <button onclick="startPlay('sealbot',false)" style="font:12px 'SF Mono',monospace;padding:10px 16px;border:2px solid #2563eb;background:#fff;color:#2563eb;cursor:pointer;text-align:left">
+          vs SealBot (SealBot plays first)
+        </button>
+      </div>
+      <div id="play-info" style="font:11px 'SF Mono',monospace;color:#666;min-height:24px;margin-bottom:8px"></div>
+      <div id="play-board" style="position:relative;width:100%;height:300px;border:1px solid #eee">
+        <canvas id="play-canvas" style="width:100%;height:100%"></canvas>
+      </div>
+      <div id="play-moves" style="font:9px 'SF Mono',monospace;margin-top:8px;max-height:80px;overflow-y:auto;color:#666"></div>
+    </div>
   </div>
 </main>
 <footer>
@@ -1623,7 +1830,7 @@ body.dark #value-chart-wrap{border-color:#333}
   <span class="sep">|</span>
   <span>Win P0:<b id="s-w0">0</b>% P1:<b id="s-w1">0</b>%</span>
   <span class="sep">|</span>
-  <span>vs Ramora: <b id="s-ramora">--</b></span>
+  <span style="color:#2563eb">vs Ramora: <b id="s-ramora-wr">--</b></span>
   <span class="sep">|</span>
   <span class="res-bar">CPU <div class="res-meter"><div class="res-meter-fill" id="cpu-fill" style="width:0%"></div></div> <b id="s-cpu">0</b>%</span>
   <span class="res-bar">RAM <div class="res-meter"><div class="res-meter-fill" id="ram-fill" style="width:0%"></div></div> <b id="s-ram">0</b>%</span>
@@ -1778,6 +1985,7 @@ socket.on('disconnect', () => {
 });
 
 let stones0 = [], stones1 = [], moveOrder = [];  // moveOrder[i] = {q, r, num, player}
+let currentGameType = 'selfplay';  // 'selfplay' or 'vs_ramora'
 
 // KaTrain-style analysis overlay state
 let analysisData = null;  // array of {value_estimate, top_moves, threat_count} per move
@@ -1943,6 +2151,7 @@ function drawHex() {
   const spanX = mxX - mnX + mg * 2, spanY = mxY - mnY + mg * 2;
   const sc = Math.min(W / spanX, H / spanY, 2.5);
   const ox = W / 2 - (mnX + mxX) / 2 * sc, oy = H / 2 - (mnY + mxY) / 2 * sc;
+  window._lastHexTransform = {ox, oy, sc};
 
   function toS(q, r) {
     const [px, py] = axToPixel(q, r);
@@ -2027,7 +2236,11 @@ function drawHex() {
     }
   }
 
-  // P1: white hexagons with hatching
+  // P1: white hexagons with hatching (blue fill for vs_ramora games)
+  const isRamoraGame = currentGameType === 'vs_ramora';
+  const p1Fill = isRamoraGame ? '#2563eb' : '#fff';       // blue vs white
+  const p1Stroke = isRamoraGame ? '#1d4ed8' : '#000';     // dark blue vs black
+  const p1Hatch = isRamoraGame ? '#93c5fd' : '#000';      // light blue vs black
   for (const [q, r] of stones1) {
     const [sx, sy] = toS(q, r);
     const key = q + ',' + r;
@@ -2035,18 +2248,18 @@ function drawHex() {
     // Quality overlay: tint the fill color
     const qual = qualityMap[key];
     if (qual === 'blunder') {
-      ctx.fillStyle = '#fcc'; ctx.fill();
+      ctx.fillStyle = isRamoraGame ? '#7c3aed' : '#fcc'; ctx.fill();
     } else if (qual === 'good') {
-      ctx.fillStyle = '#cfc'; ctx.fill();
+      ctx.fillStyle = isRamoraGame ? '#34d399' : '#cfc'; ctx.fill();
     } else {
-      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.fillStyle = p1Fill; ctx.fill();
     }
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.strokeStyle = p1Stroke; ctx.lineWidth = 1.2; ctx.stroke();
     // Hatching (skip if quality-colored for clarity)
     if (!qual || qual === 'neutral') {
       ctx.save();
       hexPath(sx, sy, hr); ctx.clip();
-      ctx.strokeStyle = '#000'; ctx.lineWidth = 0.6;
+      ctx.strokeStyle = p1Hatch; ctx.lineWidth = 0.6;
       const step = Math.max(3, 4 * sc);
       for (let d = -hr * 2; d <= hr * 2; d += step) {
         ctx.beginPath();
@@ -2157,13 +2370,16 @@ function replayGame(d) {
   currentGameData = d;
   replayMoveIdx = 0;
   stones0 = []; stones1 = []; moveOrder = [];
+  currentGameType = d.game_type || 'selfplay';
+  renderHistory();  // update active highlight
   // Set analysis data (may be null if not available)
   analysisData = d._analysis || d.analysis || null;
   const vcw = el('value-chart-wrap');
   if (vcw) vcw.style.display = (overlayMode.value && analysisData) ? '' : 'none';
   drawHex();
-  el('game-num').textContent = d.game_idx;
-  setInfo('Game #' + d.game_idx + ' playing... (' + d.moves.length + ' moves)');
+  const typeLabel = currentGameType === 'vs_ramora' ? ' [vs Ramora]' : '';
+  el('game-num').textContent = d.game_idx + typeLabel;
+  setInfo('Game #' + d.game_idx + typeLabel + ' playing... (' + d.moves.length + ' moves)');
   if (replayTimer) clearInterval(replayTimer);
   replayTimer = setInterval(replayAdvance, settings.replaySpeed);
 }
@@ -2235,6 +2451,9 @@ const gameHistoryList = [];  // store last 20 games
 function addToHistory(d) {
   gameHistoryList.push(d);
   if (gameHistoryList.length > 10) gameHistoryList.shift();
+  renderHistory();
+}
+function renderHistory() {
   const histEl = el('game-history');
   if (!histEl) return;
   histEl.innerHTML = '';
@@ -2242,8 +2461,10 @@ function addToHistory(d) {
     const span = document.createElement('span');
     span.className = 'gh-item' + (g === currentGameData ? ' active' : '');
     const w = g.result > 0 ? 'B' : 'W';
-    span.textContent = '#' + g.game_idx + ' ' + w + ' ' + g.num_moves + 'mv';
-    span.onclick = () => { replayPaused = false; replayGame(g); };
+    const tag = g.game_type === 'vs_ramora' ? 'R' : '';
+    span.textContent = '#' + g.game_idx + tag + ' ' + w + ' ' + g.num_moves + 'mv';
+    if (g.game_type === 'vs_ramora') span.style.color = '#2563eb';
+    span.onclick = () => { replayPaused = false; replayGame(g); renderHistory(); };
     histEl.appendChild(span);
   });
   histEl.scrollTop = histEl.scrollHeight;
@@ -2262,7 +2483,8 @@ socket.on('game_complete', d => {
       const pf = el('progress-fill');
       if (pf) pf.style.width = Math.round(d.game_idx / d.total_games * 100) + '%';
       const plab = el('progress-label');
-      if (plab) plab.textContent = 'Self-play ' + d.game_idx + '/' + d.total_games;
+      const plabel = d.game_type === 'vs_ramora' ? 'vs Ramora ' : 'Self-play ';
+      if (plab) plab.textContent = plabel + d.game_idx + '/' + d.total_games;
     }
     // Stats
     gameStats.count++;
@@ -2272,6 +2494,17 @@ socket.on('game_complete', d => {
     const lsL = el('ls-len'); if (lsL && gameStats.count) lsL.textContent = Math.round(gameStats.totalLen / gameStats.count);
     const lsW0 = el('ls-w0'); if (lsW0 && gameStats.count) lsW0.textContent = Math.round(gameStats.w0 / gameStats.count * 100) + '%';
     const lsW1 = el('ls-w1'); if (lsW1 && gameStats.count) lsW1.textContent = Math.round(gameStats.w1 / gameStats.count * 100) + '%';
+    // Track Ramora/SealBot stats per-game (session only, for live updates)
+    if (d.game_type === 'vs_ramora') {
+      if (!window._ramoraStats) window._ramoraStats = {w:0, l:0, d:0};
+      const or_ = d.orca_result != null ? d.orca_result : d.result;
+      if (or_ > 0) window._ramoraStats.w++;
+      else if (or_ < 0) window._ramoraStats.l++;
+      else window._ramoraStats.d++;
+      updateRamoraFooter(window._ramoraStats);
+    }
+    // Refresh charts after every game (live updates)
+    fetchCharts();
     // History + replay (NEVER interrupt a playing game)
     if (d.moves && d.moves.length) {
       // Store analysis data if present
@@ -2304,9 +2537,27 @@ socket.on('stats_update', d => {
       if (lv != null) el('ls-loss').textContent = parseFloat(lv).toFixed(4);
     }
     if (d.avg_game_length) el('ls-len').textContent = d.avg_game_length;
+    // Update Ramora cumulative stats from backend (persists across refreshes)
+    updateRamoraDisplay(d);
     fetchCharts();
   } catch (e) { console.error('stats_update error:', e); }
 });
+
+// Ramora stats display — uses backend cumulative data when available
+function updateRamoraDisplay(d) {
+  const rw = d.ramora_wins, rl = d.ramora_losses, rd = d.ramora_draws;
+  if (rw != null && rl != null) {
+    // Sync JS counter with backend totals
+    window._ramoraStats = {w: rw, l: rl, d: rd || 0};
+    updateRamoraFooter(window._ramoraStats);
+  }
+}
+function updateRamoraFooter(rs) {
+  const rn = rs.w + rs.l + rs.d;
+  if (rn > 0) {
+    el('s-ramora-wr').textContent = rs.w + 'W/' + rs.l + 'L' + (rs.d ? '/' + rs.d + 'D' : '') + ' (' + Math.round(rs.w/rn*100) + '%)';
+  }
+}
 
 socket.on('train_progress', d => {
   try {
@@ -2546,6 +2797,175 @@ function toggleDarkMode(on) {
 }
 
 // --- Lights out: black screen with minimal status ---
+// --- Interactive Play (in Play tab) ---
+let playSession = null;
+let playStones0 = [], playStones1 = [], playMoveOrder = [];
+
+function startPlay(opponent, humanFirst) {
+  const info = el('play-info');
+  info.textContent = 'Starting game...';
+  fetch('/api/play/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({opponent: opponent, human_first: humanFirst})
+  }).then(r => r.json()).then(d => {
+    if (d.error) { info.textContent = 'Error: ' + d.error; return; }
+    playSession = {id: d.session_id, opponent: opponent};
+    playStones0 = []; playStones1 = []; playMoveOrder = [];
+
+    // Apply bot's first moves
+    if (d.moves) {
+      for (const m of d.moves) playApplyMove(m.who, m.q, m.r);
+    }
+    drawPlayBoard();
+    info.textContent = 'YOUR TURN - click the board to place a stone (vs ' + opponent + ')';
+    el('play-moves').textContent = '';
+
+    // Set up click handler on play canvas
+    const cv = el('play-canvas');
+    cv.onclick = function(e) { onPlayCanvasClick(e); };
+  }).catch(e => { info.textContent = 'Error: ' + e; });
+}
+
+function playApplyMove(who, q, r) {
+  const num = playMoveOrder.length + 1;
+  let p = 0, stt = 0, need = 1;
+  for (let i = 0; i < playMoveOrder.length; i++) {
+    stt++;
+    if (stt >= need) { p = 1 - p; stt = 0; need = 2; }
+  }
+  if (p === 0) playStones0.push([q, r]); else playStones1.push([q, r]);
+  playMoveOrder.push({q, r, num, player: p, who});
+}
+
+function drawPlayBoard() {
+  const cv = el('play-canvas');
+  if (!cv) return;
+  const DPR = window.devicePixelRatio || 1;
+  const rect = cv.parentElement.getBoundingClientRect();
+  const W = Math.round(rect.width), H = Math.round(rect.height);
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const S3 = Math.sqrt(3), HEX_SIZE = 20;
+  function ax2px(q, r) { return [HEX_SIZE * (S3 * q + S3/2 * r), HEX_SIZE * 1.5 * r]; }
+
+  const all = [...playStones0, ...playStones1];
+  if (all.length === 0) {
+    // Draw origin dot
+    const ox = W/2, oy = H/2;
+    ctx.fillStyle = '#ddd'; ctx.beginPath(); ctx.arc(ox, oy, 4, 0, Math.PI*2); ctx.fill();
+    window._playTransform = {ox, oy, sc: 1};
+    return;
+  }
+
+  let mnX=1e9, mxX=-1e9, mnY=1e9, mxY=-1e9;
+  for (const [q,r] of all) {
+    const [px,py] = ax2px(q,r);
+    if(px<mnX)mnX=px; if(px>mxX)mxX=px; if(py<mnY)mnY=py; if(py>mxY)mxY=py;
+  }
+  const mg = HEX_SIZE * 4;
+  const spanX = mxX-mnX+mg*2, spanY = mxY-mnY+mg*2;
+  const sc = Math.min(W/spanX, H/spanY, 3);
+  const ox = W/2 - (mnX+mxX)/2*sc, oy = H/2 - (mnY+mxY)/2*sc;
+  window._playTransform = {ox, oy, sc};
+
+  function toS(q,r) { const [px,py]=ax2px(q,r); return [px*sc+ox, py*sc+oy]; }
+  function hex(cx,cy,sz) {
+    ctx.beginPath();
+    for(let i=0;i<6;i++){const a=Math.PI/3*i-Math.PI/6;i===0?ctx.moveTo(cx+sz*Math.cos(a),cy+sz*Math.sin(a)):ctx.lineTo(cx+sz*Math.cos(a),cy+sz*Math.sin(a));}
+    ctx.closePath();
+  }
+  const hr = HEX_SIZE * 0.85 * sc;
+
+  // Empty grid dots around stones
+  const occ = new Set(all.map(([q,r])=>q+','+r));
+  const drawn = new Set();
+  for (const [q,r] of all) {
+    for (let dq=-2;dq<=2;dq++) for (let dr=-2;dr<=2;dr++) {
+      const nq=q+dq, nr=r+dr, k=nq+','+nr;
+      if (!occ.has(k) && !drawn.has(k)) {
+        drawn.add(k);
+        const [sx,sy]=toS(nq,nr);
+        ctx.fillStyle='#ddd'; ctx.beginPath(); ctx.arc(sx,sy,2*sc,0,Math.PI*2); ctx.fill();
+      }
+    }
+  }
+
+  // P0: black
+  for (const [q,r] of playStones0) {
+    const [sx,sy]=toS(q,r); hex(sx,sy,hr);
+    ctx.fillStyle='#000'; ctx.fill(); ctx.strokeStyle='#000'; ctx.lineWidth=1; ctx.stroke();
+  }
+  // P1: white hatched (blue if sealbot)
+  const isSeal = playSession && playSession.opponent === 'sealbot';
+  for (const [q,r] of playStones1) {
+    const [sx,sy]=toS(q,r); hex(sx,sy,hr);
+    ctx.fillStyle = isSeal ? '#2563eb' : '#fff'; ctx.fill();
+    ctx.strokeStyle = isSeal ? '#1d4ed8' : '#000'; ctx.lineWidth=1.2; ctx.stroke();
+    if (!isSeal) {
+      ctx.save(); hex(sx,sy,hr); ctx.clip();
+      ctx.strokeStyle='#000'; ctx.lineWidth=0.6;
+      const step=Math.max(3,4*sc);
+      for(let d=-hr*2;d<=hr*2;d+=step){ctx.beginPath();ctx.moveTo(sx+d-hr,sy-hr);ctx.lineTo(sx+d+hr,sy+hr);ctx.stroke();}
+      ctx.restore();
+    }
+  }
+  // Move numbers
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  for (const mv of playMoveOrder) {
+    const [sx,sy]=toS(mv.q,mv.r);
+    ctx.fillStyle = mv.player===0 ? '#fff' : (isSeal ? '#fff' : '#000');
+    ctx.font = `bold ${Math.max(8,10*sc)}px 'SF Mono',monospace`;
+    ctx.fillText(mv.num, sx, sy);
+  }
+}
+
+function onPlayCanvasClick(e) {
+  if (!playSession) return;
+  const cv = el('play-canvas');
+  const rect = cv.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  if (!window._playTransform) return;
+  const {ox,oy,sc} = window._playTransform;
+  const S3 = Math.sqrt(3), HEX_SIZE = 20;
+  const px = (x - ox) / sc, py = (y - oy) / sc;
+  const r_ax = Math.round(py / (HEX_SIZE * 1.5));
+  const q_ax = Math.round((px - HEX_SIZE * S3/2 * r_ax) / (HEX_SIZE * S3));
+
+  el('play-info').textContent = 'Thinking...';
+  fetch('/api/play/move', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: playSession.id, q: q_ax, r: r_ax})
+  }).then(r => r.json()).then(d => {
+    if (d.error) {
+      el('play-info').textContent = d.error + ' - try another cell';
+      return;
+    }
+    for (const m of (d.moves || [])) playApplyMove(m.who, m.q, m.r);
+    drawPlayBoard();
+    // Update move log
+    const ml = el('play-moves');
+    ml.textContent = playMoveOrder.map(m => `${m.num}.${m.who==='human'?'You':'Bot'}(${m.q},${m.r})`).join(' ');
+    ml.scrollTop = ml.scrollHeight;
+
+    if (d.need_second) {
+      el('play-info').textContent = 'Place your second stone';
+    } else if (d.game_over) {
+      const msg = d.winner === 'human' ? 'YOU WIN!' : (d.winner === 'bot' ? 'BOT WINS!' : 'DRAW');
+      el('play-info').textContent = msg + ' (' + playMoveOrder.length + ' moves) - start a new game above';
+      cv.onclick = null;
+      playSession = null;
+    } else {
+      el('play-info').textContent = 'YOUR TURN - click the board';
+    }
+  }).catch(e => { el('play-info').textContent = 'Error: ' + e; });
+}
+
 function lightsOut() {
   // Temporarily remove dark mode filter so overlay is pure black
   document.body.classList.remove('dark');

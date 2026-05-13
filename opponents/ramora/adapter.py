@@ -1,15 +1,50 @@
-"""Adapter to play Orca against Ramora's MinimaxBot.
+"""Adapter to play Orca against SealBot (Ramora's C++ engine).
 
-Translates between our CGameState/MCTS interface and Ramora's HexGame interface.
+Translates between our CGameState/MCTS interface and SealBot's HexGame interface.
+Uses the compiled C++ minimax_cpp module for much stronger play than the
+pure Python MinimaxBot.
 """
 
-from opponents.ramora.ai import MinimaxBot
-from opponents.ramora.game import HexGame, Player
+import os
+import sys
+
+# Use SealBot's game.py (same interface as ramora's)
+_sealbot_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'sealbot')
+# Use best/ (promoted strongest version) over current/ (development)
+_sealbot_best = os.path.join(_sealbot_dir, 'best')
+_sealbot_current = os.path.join(_sealbot_dir, 'current')
+
+# MUST use SealBot's own game.py — the C++ module does py::import("game")
+# and checks Player identity with `is`. If we use a different module's Player,
+# all stones get classified as P_B (identity check fails).
+import importlib
+if _sealbot_dir not in sys.path:
+    sys.path.insert(0, _sealbot_dir)
+_seal_game = importlib.import_module('game')
+HexGame = _seal_game.HexGame
+Player = _seal_game.Player
 
 
-def create_ramora_bot(time_limit: float = 1.0) -> MinimaxBot:
-    """Create a Ramora MinimaxBot with the learned pattern evaluation."""
-    return MinimaxBot(time_limit=time_limit)
+def create_ramora_bot(time_limit: float = 1.0):
+    """Create SealBot C++ engine (much stronger than Python MinimaxBot).
+    Falls back to Python MinimaxBot if C++ module not compiled."""
+    try:
+        # SealBot needs its own game.py importable as 'game'
+        if _sealbot_dir not in sys.path:
+            sys.path.insert(0, _sealbot_dir)
+        # Try best/ first (promoted strongest), fall back to current/
+        for d in [_sealbot_best, _sealbot_current]:
+            if d not in sys.path:
+                sys.path.insert(0, d)
+        from minimax_cpp import MinimaxBot as SealBot
+        bot = SealBot(time_limit)
+        print(f"  |  SealBot loaded: depth_limit={bot.max_depth}, time={time_limit}s")
+        return bot
+    except Exception:
+        print("  |  WARNING: SealBot C++ not compiled, falling back to Python MinimaxBot")
+        print("  |  To compile: cd opponents/sealbot/current && python setup.py build_ext --inplace")
+        from opponents.ramora.ai import MinimaxBot
+        return MinimaxBot(time_limit=time_limit)
 
 
 def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_moves=200):
@@ -30,30 +65,33 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
     ramora_game = HexGame()
     orca_game = CGameState(max_total_stones=max_moves)
     move_history = []
+    orca_policies = []  # MCTS distributions for Orca's moves
     total_stones = 0
 
     while not ramora_game.game_over and total_stones < max_moves:
         is_orca_turn = (ramora_game.current_player == Player.A) == orca_plays_first
 
         if is_orca_turn:
-            # Orca plays one stone at a time
             stones_to_play = ramora_game.moves_left_in_turn
             for _ in range(stones_to_play):
                 if ramora_game.game_over or orca_game.is_terminal:
                     break
-                policy = orca_search.search(orca_game, temperature=0.1, add_noise=False)
+                # Mostly play best moves (temp=0.15), with light Dirichlet noise
+                # for game-to-game variety. This plays strong moves 90%+ of the time
+                # but occasionally picks second/third best, creating diverse games
+                # without throwing games with random moves.
+                policy = orca_search.search(orca_game, temperature=0.15, add_noise=True)
                 if not policy:
                     break
-                # Pick best move
                 best_move = max(policy, key=policy.get)
                 q, r = best_move
 
                 ramora_game.make_move(q, r)
                 orca_game.place_stone(q, r)
                 move_history.append(('orca', q, r))
+                orca_policies.append(policy)  # store full MCTS distribution
                 total_stones += 1
         else:
-            # Ramora plays (returns pair of moves)
             result = ramora_bot.get_move(ramora_game)
             if not result:
                 break
@@ -66,7 +104,6 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
                 move_history.append(('ramora', q, r))
                 total_stones += 1
 
-    # Determine winner
     if ramora_game.winner == Player.NONE:
         winner = 'draw'
     elif (ramora_game.winner == Player.A) == orca_plays_first:
@@ -79,6 +116,7 @@ def play_match(orca_search, orca_net, ramora_bot, orca_plays_first=True, max_mov
         'moves': move_history,
         'num_moves': total_stones,
         'ramora_depth': ramora_bot.last_depth,
+        'orca_policies': orca_policies,
     }
 
 

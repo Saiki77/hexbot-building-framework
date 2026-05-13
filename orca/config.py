@@ -20,8 +20,8 @@ C_PUCT = 1.5           # exploration constant
 NUM_SIMULATIONS = 400  # MCTS sims per move (curriculum may override)
 MCTS_BATCH_SIZE = 64   # positions per batched NN forward pass
 DIRICHLET_ALPHA = 0.3  # root noise (0.3 = diverse exploration)
-DIRICHLET_EPSILON = 0.25
-TEMP_THRESHOLD = 35    # moves before switching to greedy play
+DIRICHLET_EPSILON = 0.15 # fraction of prior replaced by noise (0.15 = subtle, 0.25 = aggressive)
+TEMP_THRESHOLD = 20    # moves before switching to greedy play
 
 # ---------------------------------------------------------------------------
 # Distant play (colony strategy)
@@ -35,7 +35,7 @@ DISTANT_RANGE = (2, 5)       # min/max distance from nearest stone
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
-BATCH_SIZE = 1024             # training batch size
+BATCH_SIZE = 512              # training batch size (512 = faster on MPS, 1024 = CUDA)
 LEARNING_RATE = 0.001         # Adam optimizer LR
 L2_REG = 1e-4                 # weight decay
 REPLAY_BUFFER_SIZE = 400_000  # experience replay capacity
@@ -48,11 +48,12 @@ DEFAULT_GAMES_PER_ITER = 100  # base games (curriculum may adjust)
 CHECKPOINT_EVERY = 1          # save checkpoint every N iterations
 MAX_WORKERS = 5               # parallel self-play workers
 GAMES_PER_FUTURE = 2          # games per subprocess future
-ELO_EVAL_EVERY = 1            # ELO evaluation frequency (iterations)
-ELO_EVAL_GAMES = 4            # games per ELO opponent
-ELO_EVAL_SIMS = 30            # MCTS sims during ELO games (lower = faster eval)
-ELO_MAX_OPPONENTS = 6         # max past versions to play against
-ELO_BASELINE_GAMES = 4        # games vs random + heuristic baselines (0 = disable)
+ELO_EVAL_EVERY = 3            # ELO evaluation frequency (every 3 iterations)
+ELO_EVAL_GAMES = 5            # 5 games per past generation
+ELO_EVAL_SIMS = 30            # MCTS sims during ELO games
+ELO_MAX_OPPONENTS = 3         # last 3 generations
+ELO_BASELINE_GAMES = 5        # 5 games vs random + 5 vs heuristic
+ELO_SEALBOT_GAMES = 10        # 10 games vs SealBot
 
 # ---------------------------------------------------------------------------
 # Model vault
@@ -83,11 +84,13 @@ COSINE_ETA_MIN = 1e-4
 # ---------------------------------------------------------------------------
 # Defensive training (blocking reward)
 # ---------------------------------------------------------------------------
-BLOCKING_PRIORITY_BOOST = 3.0    # priority for moves that block opponent threats
-SURVIVAL_PRIORITY_BOOST = 2.0    # priority for surviving an opponent threat turn
+BLOCKING_PRIORITY_BOOST = 5.0    # priority for moves that block opponent threats
+SURVIVAL_PRIORITY_BOOST = 3.0    # priority for surviving an opponent threat turn
 USE_AB_HYBRID = True             # set False to disable AB pre-check in MCTS
 AB_HYBRID_DEPTH = 4              # depth of AB pre-check (0 = disable)
-THREAT_POLICY_BLEND = 0.3        # blend threat spatial map into policy logits (0 = disabled)
+THREAT_POLICY_BLEND = 0.5        # blend threat spatial map into policy logits (0 = disabled)
+RAMORA_GAME_FRACTION = 0.90      # fraction of games played vs SealBot (strong opponent)
+RAMORA_TIME_LIMIT = 0.3          # seconds per move for SealBot during training
 
 # ---------------------------------------------------------------------------
 # Mixed precision (CUDA only - MPS FP16 is unreliable)

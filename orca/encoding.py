@@ -316,14 +316,18 @@ def _get_lib():
             _c_lib = _load_engine()
             _setup_c_signatures(_c_lib)
         except Exception:
-            # Fallback: try loading directly
-            engine_path = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                'engine.so')
-            if not _os.path.exists(engine_path):
+            # Fallback: try loading engine.so from a few well-known locations.
+            here = _os.path.dirname(_os.path.abspath(__file__))
+            candidates = [
+                _os.path.join(here, 'engine.so'),                         # orca/engine.so (installed)
+                _os.path.join(_os.path.dirname(here), 'engine.so'),       # repo root (dev)
+            ]
+            engine_path = next((p for p in candidates if _os.path.exists(p)), None)
+            if engine_path is None:
                 raise RuntimeError(
-                    f"C engine not found. Run from the repo directory or "
-                    f"compile manually: cc -O3 -shared -fPIC -o engine.so engine.c")
+                    "C engine not found. Run from the repo directory or "
+                    "compile manually: cc -O3 -shared -fPIC -o engine.so engine.c"
+                )
             _c_lib = ctypes.CDLL(engine_path)
             _setup_c_signatures(_c_lib)
     return _c_lib

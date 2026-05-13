@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hexbot"
-version = "4.1.0"
+version = "4.1.4"
 description = "Python framework for building AI bots for Hexagonal Connect-6"
 readme = "README.md"
 # license in classifiers below
@@ -63,4 +63,26 @@ include = ["orca*"]
 py-modules = ["hexbot", "hexgame", "bot", "main", "dashboard"]
 
 [tool.setuptools.package-data]
+orca = ["engine.c"]
 "*" = ["engine.c"]
+
+# ---------------------------------------------------------------------------
+# cibuildwheel: how the GitHub Actions release workflow builds binary wheels
+# ---------------------------------------------------------------------------
+[tool.cibuildwheel]
+# Python versions to build. Keep in sync with `requires-python` above.
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+# musllinux roughly doubles build time and only helps Alpine users; skip
+# unless someone asks. PyPy and 32-bit are also out of scope.
+skip = "*-musllinux* pp* *-win32 *-manylinux_i686"
+# Quick smoke test on every freshly built wheel: import hexgame (which lives
+# at the top level, not inside any heavy package) and confirm the engine
+# loads + basic state transitions work. This catches packaging regressions
+# without dragging torch/numpy into the test env.
+test-command = 'python -c "import hexgame; g = hexgame.HexGame(); g.place(0,0); g.place(1,0); assert g.total_stones == 2; print(\"engine OK\")"'
+
+[tool.cibuildwheel.linux]
+# Use the default manylinux_2_28 image -- it has gcc 12+ and works with
+# anything CPython 3.9+ users typically run.
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"

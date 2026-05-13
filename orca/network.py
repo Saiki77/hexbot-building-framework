@@ -458,9 +458,7 @@ def export_onnx(net: HexNet, path: str = '/tmp/hex_model.onnx'):
     prev_level = onnx_logger.level
     onnx_logger.setLevel(logging.ERROR)
     devnull = io.StringIO()
-    with warnings.catch_warnings(), \
-         contextlib.redirect_stdout(devnull), \
-         contextlib.redirect_stderr(devnull):
+    with warnings.catch_warnings(), contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
         warnings.simplefilter("ignore")
         torch.onnx.export(
             wrapper, dummy, path,
