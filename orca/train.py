@@ -18,10 +18,13 @@ from __future__ import annotations
 import argparse
 import collections
 import glob
+import json
 import math
 import multiprocessing
 import os
 import pickle
+import platform
+import socket
 import random
 import signal
 import sys
@@ -776,6 +779,7 @@ class OrcaTrainer:
         use_curriculum: bool = True,
         use_auto_tuner: bool = True,
         auto_tuner_dry_run: bool = False,
+        tensorboard: bool = False,
         use_adaptive_lr: bool = True,
         use_augmentation: bool = True,
         use_mixed_precision: bool = True,
@@ -862,6 +866,8 @@ class OrcaTrainer:
         self.use_curriculum = use_curriculum
         self.use_auto_tuner = use_auto_tuner
         self.auto_tuner_dry_run = auto_tuner_dry_run
+        self.tensorboard_enabled = tensorboard
+        self._tb_writer = None
         self.use_adaptive_lr = use_adaptive_lr
         self.use_augmentation = use_augmentation
         self.use_mixed_precision = use_mixed_precision and self.device.type == 'cuda'
@@ -920,6 +926,8 @@ class OrcaTrainer:
         print(f"  Iterations:  {self.num_iterations}")
         print(f"  Games/iter:  {self.games_per_iter}")
         print(f"  Train steps: {self.train_steps}/iter")
+        print(f"  Run dir:     {self._run_dir}")
+        self._init_observability()
 
         # Detect C engine
         use_v2 = False
@@ -1252,12 +1260,32 @@ class OrcaTrainer:
             # Record iteration duration for next iteration's ETA
             self._iter_times.append(total_time)
 
+            # TensorBoard scalars for run-to-run comparison
+            self._tb_log(
+                iteration + 1,
+                **{
+                    "loss/total": losses.get("total"),
+                    "loss/policy": losses.get("policy"),
+                    "loss/value": losses.get("value"),
+                    "elo/current": self.metrics.get("current_elo"),
+                    "lr": current_lr,
+                    "time/iter_seconds": total_time,
+                    "time/selfplay_seconds": sp_time,
+                    "time/train_seconds": train_time,
+                    "buffer/size": len(replay_buffer),
+                    "games/completed": game_idx,
+                    "games/samples": total_samples,
+                },
+            )
+
             # -- Checkpoint -------------------------------------------------------
             from orca.config import CHECKPOINT_EVERY
             if (iteration + 1) % CHECKPOINT_EVERY == 0:
                 self._save_checkpoint(
                     iteration, optimizer, scheduler, replay_buffer, auto_tuner)
 
+
+        self._close_observability()
 
         print(f"\n{'=' * 60}")
         print(f"  TRAINING COMPLETE -- {self.num_iterations} iterations")
@@ -1864,6 +1892,85 @@ class OrcaTrainer:
             "collected_samples": collected_samples,
         }
 
+    def _init_observability(self) -> None:
+        """Write run manifest and open TensorBoard writer if requested.
+
+        Manifest captures CLI args, config, git sha, hostname, GPU info, and
+        framework versions so a run can be reproduced or audited later.
+        TensorBoard writer is opt-in via the `tensorboard=True` constructor
+        flag (or `--tensorboard` on the CLI). Missing the `tensorboard` pip
+        package is logged but not fatal.
+        """
+        manifest = {
+            "run_id": getattr(self, "_run_id", "unknown"),
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "cli_args": list(sys.argv),
+            "hexbot_version": _hexbot_version(),
+            "git_sha": _get_git_sha(),
+            "hostname": socket.gethostname(),
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "torch": torch.__version__,
+            "device": str(self.device),
+            "cuda_available": torch.cuda.is_available(),
+            "config": {
+                "net_config": self.net_config,
+                "num_iterations": self.num_iterations,
+                "games_per_iter": self.games_per_iter,
+                "mcts_sims": self.mcts_sims,
+                "batch_size": self.batch_size,
+                "lr": self.lr,
+                "num_workers": self.num_workers,
+                "use_curriculum": self.use_curriculum,
+                "use_auto_tuner": self.use_auto_tuner,
+                "use_augmentation": self.use_augmentation,
+                "use_mixed_precision": self.use_mixed_precision,
+            },
+        }
+        if torch.cuda.is_available():
+            try:
+                manifest["gpu_name"] = torch.cuda.get_device_name(0)
+            except Exception:
+                pass
+        try:
+            with open(os.path.join(self._run_dir, "manifest.json"), "w") as f:
+                json.dump(manifest, f, indent=2, default=str)
+            print(f"  Manifest: {os.path.join(self._run_dir, 'manifest.json')}")
+        except Exception as e:
+            print(f"  Manifest write failed: {e}")
+
+        if self.tensorboard_enabled:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+                self._tb_writer = SummaryWriter(log_dir=self._run_dir)
+                print(f"  TensorBoard: tensorboard --logdir {self._run_dir}")
+            except ImportError:
+                print("  TensorBoard requested but `tensorboard` not installed "
+                      "(`pip install tensorboard`)")
+                self._tb_writer = None
+
+    def _tb_log(self, iteration: int, **metrics) -> None:
+        """Best-effort TensorBoard scalar logging. Silent if writer is None."""
+        if self._tb_writer is None:
+            return
+        for tag, value in metrics.items():
+            if value is None:
+                continue
+            try:
+                self._tb_writer.add_scalar(tag, float(value), iteration)
+            except Exception:
+                pass
+
+    def _close_observability(self) -> None:
+        """Flush and close the TensorBoard writer if open."""
+        if self._tb_writer is not None:
+            try:
+                self._tb_writer.flush()
+                self._tb_writer.close()
+            except Exception:
+                pass
+            self._tb_writer = None
+
     def _log_worker_error(self, where: str, exc: Exception,
                           iteration: int) -> None:
         """Log a worker future failure to runs/<id>/workers.log + stdout summary.
@@ -2027,6 +2134,9 @@ All parameters default to values in orca/config.py. CLI args override config.
                    help="Disable AutoTuner hyperparameter adjustment")
     g.add_argument("--auto-tuner-dry-run", action="store_true",
                    help="Log AutoTuner proposed changes without applying them")
+    g.add_argument("--tensorboard", action="store_true",
+                   help="Write TensorBoard scalars to runs/<id>/ for "
+                        "run-to-run comparison (requires `pip install tensorboard`)")
     g.add_argument("--no-adaptive-lr", action="store_true",
                    help="Disable cosine annealing LR (use fixed LR)")
     g.add_argument("--no-augmentation", action="store_true",
@@ -2066,6 +2176,7 @@ All parameters default to values in orca/config.py. CLI args override config.
         use_curriculum=not args.no_curriculum,
         use_auto_tuner=not args.no_auto_tuner,
         auto_tuner_dry_run=args.auto_tuner_dry_run,
+        tensorboard=args.tensorboard,
         use_adaptive_lr=not args.no_adaptive_lr,
         use_augmentation=not args.no_augmentation,
         plateau_threshold=args.plateau_threshold,
