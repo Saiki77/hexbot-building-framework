@@ -41,7 +41,7 @@ def fetch_page(page: int, page_size: int = 20) -> list:
 def fetch_game_detail(game_id: str) -> dict:
     """Fetch full game details including moves."""
     try:
-        resp = SESSION.get(f"{BASE_URL}/game/{game_id}", timeout=15)
+        resp = SESSION.get(f"{BASE_URL}/finished-games/{game_id}", timeout=15)
         resp.raise_for_status()
         return resp.json()
     except Exception:
@@ -61,7 +61,7 @@ def scrape_games(
     Returns number of games saved.
     """
     saved = 0
-    page = 0
+    page = 1
     seen_ids = set()
 
     # Load existing IDs to avoid duplicates
