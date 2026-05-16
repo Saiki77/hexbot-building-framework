@@ -16,6 +16,7 @@ CLI usage:
 from __future__ import annotations
 
 import argparse
+import collections
 import glob
 import math
 import multiprocessing
@@ -130,6 +131,20 @@ def _atomic_pickle_save(obj, path: str) -> None:
     with open(tmp_path, "wb") as f:
         pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
     os.replace(tmp_path, path)
+
+
+def _format_eta(seconds: float) -> str:
+    """Human-friendly duration: 45s, 12m, 3.4h, 2.1d."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.0f}m"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f}h"
+    days = hours / 24
+    return f"{days:.1f}d"
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +827,9 @@ class OrcaTrainer:
         cpu_count = multiprocessing.cpu_count()
         self.num_workers = num_workers or min(MAX_WORKERS, max(2, cpu_count - 2))
 
+        # Rolling window of iteration durations for ETA estimation
+        self._iter_times: collections.deque = collections.deque(maxlen=8)
+
         # Feature toggles
         self.use_curriculum = use_curriculum
         self.use_auto_tuner = use_auto_tuner
@@ -939,6 +957,15 @@ class OrcaTrainer:
             print(f"  +-- Iter {iteration + 1}/{self.num_iterations} "
                   f"| sims={current_sims} | games={current_games} "
                   f"| lr={current_lr:.4f} | {hours:.1f}h")
+
+            # ETA estimate from rolling iteration-time average
+            if self._iter_times:
+                avg_iter_sec = sum(self._iter_times) / len(self._iter_times)
+                remaining_iters = self.num_iterations - iteration
+                eta_sec = avg_iter_sec * remaining_iters
+                print(f"  |  ETA: {_format_eta(eta_sec)} "
+                      f"(avg {avg_iter_sec:.0f}s/iter over last "
+                      f"{len(self._iter_times)})")
 
             # Load human games on first iteration
             if iteration == 0:
@@ -1191,6 +1218,9 @@ class OrcaTrainer:
             print(f"  +-- Iter {iteration + 1} done: {total_time:.1f}s "
                   f"| {game_idx} games | {total_samples} samples{elo_str}")
             print()
+
+            # Record iteration duration for next iteration's ETA
+            self._iter_times.append(total_time)
 
             # -- Checkpoint -------------------------------------------------------
             from orca.config import CHECKPOINT_EVERY
