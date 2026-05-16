@@ -6,6 +6,8 @@ Home of the **Orca** bot.
 
 [![PyPI](https://img.shields.io/pypi/v/hexbot)](https://pypi.org/project/hexbot/)
 
+> **Built a great bot with this?** Open an issue or get in touch, and I'll feature it here.
+
 ## Installation
 
 ```bash
