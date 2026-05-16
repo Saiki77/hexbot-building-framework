@@ -26,7 +26,7 @@ import copy
 
 sys.path.insert(0, '.')
 from hexbot import HexGame, evaluate_moves
-from dashboard_clean import Dashboard
+from dashboard import Dashboard
 
 
 # ---------------------------------------------------------------------------
