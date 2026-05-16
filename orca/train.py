@@ -618,9 +618,15 @@ class GenerationalArena:
 
 class AutoTuner:
     """Observes metrics after each iteration and adjusts hyperparams.
-    Rule-based + trend detection. No external ML needed."""
+    Rule-based + trend detection. No external ML needed.
 
-    def __init__(self):
+    Pass dry_run=True to log proposed changes without applying them.
+    Useful for understanding what the tuner would do before trusting it
+    with a long training run.
+    """
+
+    def __init__(self, dry_run: bool = False):
+        self.dry_run = dry_run
         self.loss_history: list = []
         self.elo_history: list = []
         self.decisions: list = []
@@ -680,11 +686,6 @@ class AutoTuner:
             p["train_steps"] = min(300, p["train_steps"] + 50)
             changes.append(f"train_steps->{p['train_steps']}")
 
-        if changes:
-            self._log(iteration, " | ".join(changes))
-        else:
-            self._log(iteration, "no changes")
-
         # Normalize mix ratios
         total_mix = sum(p[k] for k in [
             "mix_normal", "mix_catalog", "mix_endgame",
@@ -693,6 +694,20 @@ class AutoTuner:
             for k in ["mix_normal", "mix_catalog", "mix_endgame",
                        "mix_formation", "mix_sequence"]:
                 p[k] /= total_mix
+
+        if self.dry_run:
+            prefix = "(dry-run preview) "
+            if changes:
+                self._log(iteration, prefix + " | ".join(changes))
+            else:
+                self._log(iteration, prefix + "no changes")
+            self.param_history.append(self.params.copy())
+            return self.params  # do NOT mutate
+
+        if changes:
+            self._log(iteration, " | ".join(changes))
+        else:
+            self._log(iteration, "no changes")
 
         self.params = p
         self.param_history.append(p.copy())
@@ -760,6 +775,7 @@ class OrcaTrainer:
         # Feature toggles
         use_curriculum: bool = True,
         use_auto_tuner: bool = True,
+        auto_tuner_dry_run: bool = False,
         use_adaptive_lr: bool = True,
         use_augmentation: bool = True,
         use_mixed_precision: bool = True,
@@ -845,6 +861,7 @@ class OrcaTrainer:
         # Feature toggles
         self.use_curriculum = use_curriculum
         self.use_auto_tuner = use_auto_tuner
+        self.auto_tuner_dry_run = auto_tuner_dry_run
         self.use_adaptive_lr = use_adaptive_lr
         self.use_augmentation = use_augmentation
         self.use_mixed_precision = use_mixed_precision and self.device.type == 'cuda'
@@ -919,7 +936,7 @@ class OrcaTrainer:
             optimizer, T_0=self.scheduler_T0, T_mult=self.scheduler_Tmult,
             eta_min=self.scheduler_eta_min)
         replay_buffer = ReplayBuffer()
-        auto_tuner = AutoTuner()
+        auto_tuner = AutoTuner(dry_run=self.auto_tuner_dry_run)
 
         # Mixed precision (CUDA only)
         grad_scaler = None
@@ -2008,6 +2025,8 @@ All parameters default to values in orca/config.py. CLI args override config.
                    help="Disable adaptive sim/game curriculum (use fixed values)")
     g.add_argument("--no-auto-tuner", action="store_true",
                    help="Disable AutoTuner hyperparameter adjustment")
+    g.add_argument("--auto-tuner-dry-run", action="store_true",
+                   help="Log AutoTuner proposed changes without applying them")
     g.add_argument("--no-adaptive-lr", action="store_true",
                    help="Disable cosine annealing LR (use fixed LR)")
     g.add_argument("--no-augmentation", action="store_true",
@@ -2046,6 +2065,7 @@ All parameters default to values in orca/config.py. CLI args override config.
         elo_games=args.elo_games,
         use_curriculum=not args.no_curriculum,
         use_auto_tuner=not args.no_auto_tuner,
+        auto_tuner_dry_run=args.auto_tuner_dry_run,
         use_adaptive_lr=not args.no_adaptive_lr,
         use_augmentation=not args.no_augmentation,
         plateau_threshold=args.plateau_threshold,
