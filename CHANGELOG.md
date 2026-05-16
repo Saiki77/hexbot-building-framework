@@ -1,5 +1,40 @@
 # Changelog
 
+## v4.2.0 - Training Workflow & Observability
+
+### Training Workflow Polish
+- **Hardware profiles** (`--profile=mps-laptop|cuda-single|cuda-multi|cpu-only|colab-t4`) - pick sensible defaults for batch size, workers, MCTS sims, and games-per-iter in one flag. Explicit CLI args still win.
+- **`python -m orca init <name>`** - scaffolder that drops a templated project with config, `train.sh`, `play.sh`, `plugins.py`, and README. Lowers first-run friction from "read the wiki" to "run two commands."
+- **Atomic checkpoint and replay-buffer writes** - `torch.save` and `pickle.dump` now go via `.tmp` then `os.replace()`. SIGKILL mid-write no longer corrupts the canonical file.
+- **Checkpoint metadata** - every `.pt` carries a `_hexbot_meta` dict (schema_version, arch, iter, elo, git_sha, hexbot_version, timestamp). Loaders no longer need to infer architecture from filename.
+- **ETA + moving-average iteration timer** - rolling 8-iter window prints projected completion at the start of every iteration.
+- **`--auto-tuner-dry-run`** - preview AutoTuner decisions without applying them.
+- **Plateau detection wiring** - the `PLATEAU_*` config values and `--plateau-*` CLI flags were stored but never read; they now actually trigger an MCTS sim boost when ELO stalls.
+
+### Observability
+- **TensorBoard writer** (`--tensorboard`, opt-in) - logs `loss/total`, `loss/policy`, `loss/value`, `elo/current`, `lr`, `time/iter_seconds`, `buffer/size`, `games/completed` to `runs/<id>/`.
+- **Weights & Biases integration** (`--wandb`, opt-in via `pip install 'hexbot[wandb]'`) - same metric stream, same step indexing.
+- **Run manifest** (`runs/<id>/manifest.json`) - CLI args, config snapshot, git sha, hostname, GPU info, hexbot/PyTorch versions, written at run start.
+- **Worker error log** (`runs/<id>/workers.log`) - process pool failures now log full tracebacks with iteration, timestamp, and source site instead of being swallowed or inlined.
+
+### Community & Discoverability
+- **Featured Community Bots table** in README, auto-regenerated from `leaderboard.json` by a scheduled GitHub Action (or push to `leaderboard.json`).
+- **Colab quickstart notebook** (`notebooks/colab_quickstart.ipynb`) - one-click train + TensorBoard view on a free T4 GPU.
+- **PR smoke CI** (`.github/workflows/pr-smoke.yml`) - tests + 2-iteration training + scaffolder check on every PR and push to main.
+
+### Cleanup
+- **`orca/distributed.py`** - `MultiGPUTrainer` and `RayTrainer` stubs now emit a `UserWarning` and carry STUB labels in docstrings. They previously advertised DDP / Ray scaling but silently fell back to single-GPU `OrcaTrainer`.
+- **SealBot expert demo samples** auto-enabled once `_last_policy_loss < 3.0`, the same threshold used for the soft MCTS target switch.
+
+### Stretch
+- **Optuna sweep adapter** (`python -m orca.sweep`, requires `pip install 'hexbot[sweep]'`) - hyperparameter sweep over `lr`, `batch_size`, `mcts_sims`, `train_steps` with final ELO as the objective.
+
+### Optional extras added
+- `hexbot[tensorboard]`, `hexbot[wandb]`, `hexbot[sweep]`. `hexbot[all]` now pulls all three.
+
+### Backwards Compatible
+All v4.1.4 API unchanged. New features are opt-in via flags; existing scripts run unchanged.
+
 ## v4.1.0 - Training Quality + CUDA Performance + Analysis View
 
 ### CUDA Performance (2x speedup on NVIDIA GPUs)
