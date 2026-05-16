@@ -1559,11 +1559,30 @@ class OrcaTrainer:
                     collected_samples.append(s)
 
                 else:
-                    # --- SealBot's move: skip for now ---
-                    # Expert demo samples disabled until loss stabilizes.
-                    # They may confuse the value head with mixed perspectives.
-                    # TODO: re-enable once loss < 3.0 (same auto-switch as soft targets)
-                    pass
+                    # --- SealBot's move: expert demonstration (auto-enabled) ---
+                    # One-hot policy + game-outcome value at lower priority.
+                    # Gated on the same _last_policy_loss < 3.0 threshold as
+                    # the soft MCTS targets above, so we only add expert
+                    # samples once Orca's own policy head is stable enough
+                    # to not be confused by them.
+                    if (hasattr(self, '_last_policy_loss') and
+                            self._last_policy_loss < 3.0):
+                        policy_target = np.zeros(19 * 19, dtype=np.float32)
+                        iq, ir = q - oq, r - orr
+                        if 0 <= iq < 19 and 0 <= ir < 19:
+                            policy_target[iq * 19 + ir] = 1.0
+                        s = TrainingSample(
+                            encoded_state=enc,
+                            policy_target=policy_target,
+                            player=game.current_player,
+                            result=max(-1.0, min(1.0,
+                                                  base_orca_result * decay)),
+                            threat_label=threat,
+                            priority=0.5,
+                        )
+                        samples.append(s)
+                        replay_buffer.push(s)
+                        collected_samples.append(s)
 
                 game.place_stone(q, r)
 
