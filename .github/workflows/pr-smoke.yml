@@ -1,0 +1,66 @@
+name: PR smoke
+
+# Fast checks that run on every PR (and pushes to main): unit tests +
+# a tiny 2-iteration training smoke run. The goal is to catch obvious
+# regressions in the training pipeline before a maintainer has to
+# review the diff. Total runtime target: under 5 minutes.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Tests + training smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Install package in editable mode
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -q --maxfail=3
+        continue-on-error: false
+
+      - name: Training smoke run (2 iterations, tiny config)
+        run: |
+          python -m orca.train \
+            --iterations 2 \
+            --games-per-iter 4 \
+            --mcts-sims 16 \
+            --train-steps 20 \
+            --batch-size 32 \
+            --workers 2 \
+            --no-auto-tuner \
+            --no-curriculum
+        timeout-minutes: 10
+
+      - name: Scaffolder smoke (orca init)
+        run: |
+          python -m orca init demo-bot --profile=cpu-only
+          test -f demo-bot/train.sh
+          test -f demo-bot/README.md
+          test -x demo-bot/train.sh
