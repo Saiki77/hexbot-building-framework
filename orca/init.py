@@ -149,11 +149,11 @@ def scaffold(name: str, profile: str = "cpu-only", force: bool = False) -> int:
 
     Returns 0 on success, non-zero on error.
     """
-    if not name or "/" in name or name.startswith("."):
+    target = os.path.abspath(name)
+    basename = os.path.basename(target.rstrip(os.sep))
+    if not basename or basename.startswith("."):
         print(f"error: invalid project name {name!r}")
         return 2
-
-    target = os.path.abspath(name)
     if os.path.exists(target) and not force:
         print(f"error: {target} already exists (use --force to overwrite)")
         return 1

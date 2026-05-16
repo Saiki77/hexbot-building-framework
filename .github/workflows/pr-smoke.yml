@@ -41,17 +41,7 @@ jobs:
           pip install pytest
 
       - name: Run unit tests
-        run: |
-          # Skip two legacy test modules:
-          # - test_pip_install.py calls sys.exit at module-load time
-          #   (cannot be collected by pytest).
-          # - test_c_mcts.py references board_encode_state_full which is
-          #   not exported by the current C engine build; the tests are
-          #   stale w.r.t. orca/encoding.py. Track these as separate
-          #   cleanup tasks rather than gating the smoke run on them.
-          pytest tests/ -q --maxfail=3 \
-            --ignore=tests/test_pip_install.py \
-            --ignore=tests/test_c_mcts.py
+        run: pytest tests/ -q --maxfail=3
         continue-on-error: false
 
       - name: Training smoke run (2 iterations, tiny config)
