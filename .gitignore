@@ -1,5 +1,6 @@
 # Training artifacts
 hex_checkpoint_*.pt
+hex_best*.pt
 replay_buffer.pkl
 *.jsonl
 
@@ -38,6 +39,9 @@ generate_figures.py
 visualize_network.py
 gen_hero.py
 gen_netviz.py
+diagnose_learning.py
+diagnose_v2.py
+stress_cpu.py
 triangle/
 strategy_doc.pdf
 PROJECT_SUMMARY.md
