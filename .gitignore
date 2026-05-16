@@ -36,6 +36,8 @@ online_player.py
 scrape_games.py
 generate_figures.py
 visualize_network.py
+gen_hero.py
+gen_netviz.py
 triangle/
 strategy_doc.pdf
 PROJECT_SUMMARY.md
