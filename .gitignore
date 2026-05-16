@@ -3,6 +3,7 @@ hex_checkpoint_*.pt
 hex_best*.pt
 replay_buffer.pkl
 *.jsonl
+runs/
 
 # Compiled C engine (auto-built from engine.c)
 engine.so

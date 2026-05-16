@@ -42,7 +42,10 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest tests/ -q --maxfail=3
+          # test_pip_install.py is a legacy script that calls sys.exit at
+          # module-load time; pytest cannot collect it. Skip it explicitly.
+          pytest tests/ -q --maxfail=3 \
+            --ignore=tests/test_pip_install.py
         continue-on-error: false
 
       - name: Training smoke run (2 iterations, tiny config)
