@@ -2170,7 +2170,25 @@ All parameters default to values in orca/config.py. CLI args override config.
     g.add_argument("--no-ab-hybrid", action="store_true",
                    help="Disable AB pre-check in MCTS (let MCTS handle wins/blocks)")
 
+    # Hardware profile
+    from orca.config import list_profiles, get_profile
+    g = parser.add_argument_group("hardware profile")
+    g.add_argument("--profile", type=str, default=None, choices=list_profiles(),
+                   help="Apply hardware defaults (batch_size, workers, "
+                        "mcts_sims, games_per_iter). Explicit CLI args win.")
+
     args = parser.parse_args()
+
+    # Apply profile defaults to any args the user did not set explicitly
+    if args.profile:
+        profile = get_profile(args.profile)
+        applied = []
+        for key, val in profile.items():
+            if getattr(args, key, None) is None:
+                setattr(args, key, val)
+                applied.append(f"{key}={val}")
+        if applied:
+            print(f"[profile={args.profile}] " + " ".join(applied))
 
     # Apply AB hybrid toggle to config at runtime
     if args.no_ab_hybrid:

@@ -104,3 +104,54 @@ GRAD_CLIP_NORM = 1.0          # gradient clipping (0 = disabled)
 TRANSFORMER_LAYERS = 2
 TRANSFORMER_HEADS = 8
 TRANSFORMER_DROPOUT = 0.1
+
+
+# ---------------------------------------------------------------------------
+# Hardware profiles
+# ---------------------------------------------------------------------------
+# Opt-in defaults for common setups. Selected via `--profile <name>` on the
+# CLI; values are applied only where the user did not pass an explicit flag.
+# Add or tweak entries here when a new platform becomes common; CLI args
+# always win, so existing scripts are never affected.
+PROFILES = {
+    "mps-laptop": {
+        "batch_size": 256,
+        "workers": 4,
+        "mcts_sims": 100,
+        "games_per_iter": 30,
+    },
+    "cuda-single": {
+        "batch_size": 1024,
+        "workers": 8,
+        "mcts_sims": 200,
+        "games_per_iter": 50,
+    },
+    "cuda-multi": {
+        "batch_size": 2048,
+        "workers": 16,
+        "mcts_sims": 200,
+        "games_per_iter": 100,
+    },
+    "cpu-only": {
+        "batch_size": 64,
+        "workers": 2,
+        "mcts_sims": 50,
+        "games_per_iter": 10,
+    },
+    "colab-t4": {
+        "batch_size": 512,
+        "workers": 4,
+        "mcts_sims": 100,
+        "games_per_iter": 30,
+    },
+}
+
+
+def get_profile(name: str) -> dict:
+    """Return profile dict by name, or None if unknown."""
+    return PROFILES.get(name)
+
+
+def list_profiles() -> list:
+    """List available hardware profile names."""
+    return list(PROFILES.keys())
