@@ -63,6 +63,76 @@ print = _ts_print
 
 
 # ---------------------------------------------------------------------------
+# Atomic save helpers + checkpoint metadata
+# ---------------------------------------------------------------------------
+
+def _get_git_sha() -> str:
+    """Return current short git sha, or empty string if unavailable."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()[:12]
+    except Exception:
+        pass
+    return ""
+
+
+def _hexbot_version() -> str:
+    """Return installed orca/hexbot version, or 'unknown'."""
+    try:
+        import orca
+        return getattr(orca, "__version__", "unknown")
+    except Exception:
+        return "unknown"
+
+
+_CHECKPOINT_SCHEMA_VERSION = 1
+
+
+def _make_checkpoint_meta(arch: str, iteration: int,
+                          elo: Optional[float] = None) -> Dict:
+    """Standard metadata block embedded in every checkpoint .pt.
+
+    Consumers can read this with `torch.load(path)["_hexbot_meta"]`
+    to know architecture, iteration, elo, git sha, version, and timestamp
+    without inferring from filename or globbing.
+    """
+    return {
+        "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "arch": arch,
+        "iter": int(iteration),
+        "elo": float(elo) if elo is not None else None,
+        "git_sha": _get_git_sha(),
+        "hexbot_version": _hexbot_version(),
+        "timestamp": time.time(),
+    }
+
+
+def _atomic_torch_save(obj, path: str) -> None:
+    """torch.save with temp-file + os.replace for crash safety.
+
+    Writes to `path + '.tmp'` first, then atomically renames. If the process
+    is killed mid-write, the original file (if any) is untouched.
+    """
+    tmp_path = path + ".tmp"
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def _atomic_pickle_save(obj, path: str) -> None:
+    """pickle.dump with temp-file + os.replace for crash safety."""
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp_path, path)
+
+
+# ---------------------------------------------------------------------------
 # PrintObserver -- stdout-based TrainingObserver
 # ---------------------------------------------------------------------------
 
@@ -1050,9 +1120,16 @@ class OrcaTrainer:
                     if new_elo > best:
                         self.metrics["best_elo"] = new_elo
                         self.metrics["best_iteration"] = iteration + 1
-                        torch.save({"model_state_dict": self.net.state_dict(),
-                                    "iteration": iteration + 1, "elo": new_elo},
-                                   "hex_best.pt")
+                        _atomic_torch_save({
+                            "model_state_dict": self.net.state_dict(),
+                            "iteration": iteration + 1,
+                            "elo": new_elo,
+                            "_hexbot_meta": _make_checkpoint_meta(
+                                arch=self.net_config,
+                                iteration=iteration + 1,
+                                elo=new_elo,
+                            ),
+                        }, "hex_best.pt")
                         print(f"  |  NEW BEST ELO (saved hex_best.pt)")
                 except Exception as e:
                     print(f"  |  ELO eval error: {e}")
@@ -1735,7 +1812,7 @@ class OrcaTrainer:
                          replay_buffer: ReplayBuffer, auto_tuner: AutoTuner):
         """Save model checkpoint and replay buffer."""
         ckpt_path = f"hex_checkpoint_{iteration + 1}.pt"
-        torch.save({
+        _atomic_torch_save({
             "iteration": iteration,
             "model_state_dict": self.net.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
@@ -1751,15 +1828,18 @@ class OrcaTrainer:
                 "loss_history": auto_tuner.loss_history,
                 "elo_history": auto_tuner.elo_history,
             },
+            "_hexbot_meta": _make_checkpoint_meta(
+                arch=self.net_config,
+                iteration=iteration + 1,
+                elo=self.metrics.get("current_elo"),
+            ),
         }, ckpt_path)
 
         try:
-            buf_path = "replay_buffer.pkl"
-            with open(buf_path, "wb") as f:
-                pickle.dump({
-                    "buffer": list(replay_buffer.buffer),
-                    "priorities": list(replay_buffer.priorities),
-                }, f, protocol=pickle.HIGHEST_PROTOCOL)
+            _atomic_pickle_save({
+                "buffer": list(replay_buffer.buffer),
+                "priorities": list(replay_buffer.priorities),
+            }, "replay_buffer.pkl")
         except Exception as e:
             print(f"  Buffer save failed: {e}")
 
