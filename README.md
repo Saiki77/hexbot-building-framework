@@ -33,6 +33,14 @@ Zoo.upload('my-bot-v1.pt', name='my-bot-v1')
 
 Trained something interesting? Publish it and the next person can pull it with one line. See the [Evaluation and Sharing](https://github.com/Saiki77/hexbot-building-framework/wiki/Evaluation-and-Sharing) wiki page for the full lifecycle (Arena, Leaderboard, Zoo).
 
+## Featured Community Bots
+
+<!-- BOTS:START -->
+_No community bots rated yet. Train one, then `Leaderboard().rate(bot, name='my-bot-v1')` to land here. See [Evaluation and Sharing](https://github.com/Saiki77/hexbot-building-framework/wiki/Evaluation-and-Sharing)._
+<!-- BOTS:END -->
+
+This table is regenerated from `leaderboard.json` by `scripts/update_featured_bots.py` (runs in CI on every push to main).
+
 ## Installation
 
 ```bash
