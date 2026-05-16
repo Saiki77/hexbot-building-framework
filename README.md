@@ -5,6 +5,9 @@ A Python framework for building AI bots for [Hexagonal Tic-Tac-Toe](https://hexo
 Home of the **Orca** bot.
 
 [![PyPI](https://img.shields.io/pypi/v/hexbot)](https://pypi.org/project/hexbot/)
+[![Wiki](https://img.shields.io/badge/docs-wiki-blue?logo=github)](https://github.com/Saiki77/hexbot-building-framework/wiki)
+
+> Full guides, learning path, and feature reference live on the **[Wiki](https://github.com/Saiki77/hexbot-building-framework/wiki)**. Start with [Quickstart](https://github.com/Saiki77/hexbot-building-framework/wiki/Quickstart) or [Concepts](https://github.com/Saiki77/hexbot-building-framework/wiki/Concepts).
 
 > **Built a great bot with this?** Open an issue or get in touch, and I'll feature it here.
 
@@ -186,18 +189,20 @@ Measures: C engine speed, NN inference, MCTS search, self-play, training steps, 
 
 ## Documentation
 
-| Guide | Description |
-|-------|-------------|
-| [Getting Started](docs/getting-started.md) | Game API, coordinates, turn structure |
-| [Bot Approaches](docs/bot-approaches.md) | 6 approaches with full code |
-| [API Reference](docs/api-reference.md) | All function signatures |
-| [Training Guide](docs/training-guide.md) | Self-play, SFT, curriculum, distributed |
-| [Configuration](docs/configuration.md) | Every tunable parameter |
-| [Dashboard](docs/dashboard-guide.md) | REST API, WebSocket |
-| [Train Dashboard](docs/train-dashboard.md) | Web UI for training |
-| [SFT Guide](docs/sft-guide.md) | Train from game collections |
-| [Advanced](docs/advanced.md) | Solver, opening book, ensemble, MCTS tricks |
-| [Orca Bot](docs/orca.md) | Architectures, loading, training |
+Full docs live on the **[Wiki](https://github.com/Saiki77/hexbot-building-framework/wiki)** (16 pages organized by Learn / Build / Train / Evaluate / Reference).
+
+Good starting points:
+
+| Page | What it covers |
+|------|----------------|
+| [Quickstart](https://github.com/Saiki77/hexbot-building-framework/wiki/Quickstart) | 5 minutes from `pip install` to a bot playing |
+| [Game Rules](https://github.com/Saiki77/hexbot-building-framework/wiki/Game-Rules) | Hex Connect-6 rules in 60 seconds |
+| [Concepts](https://github.com/Saiki77/hexbot-building-framework/wiki/Concepts) | MCTS, AlphaZero, policy/value, ELO explained |
+| [Bot Approaches](https://github.com/Saiki77/hexbot-building-framework/wiki/Bot-Approaches) | Six complete bot designs with full code |
+| [Training Guide](https://github.com/Saiki77/hexbot-building-framework/wiki/Training-Guide) | Self-play, SFT, curriculum, distributed |
+| [Playing Online](https://github.com/Saiki77/hexbot-building-framework/wiki/Playing-Online) | Run your bot on hexo.did.science |
+| [API Reference](https://github.com/Saiki77/hexbot-building-framework/wiki/API-Reference) | All public functions and classes |
+| [FAQ](https://github.com/Saiki77/hexbot-building-framework/wiki/FAQ) | Common pitfalls and questions |
 
 ## Contributing
 
