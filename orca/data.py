@@ -947,7 +947,7 @@ def self_play_game_v2(
         if PLAY_STYLE == 'distant' and move_count < 10 and random.random() < 0.3:
             existing = _get_existing_stones(game)
             if existing and len(policy) > 0:
-                lo, hi = _dr
+                lo, hi = DISTANT_RANGE
                 gap_candidates = []
                 for sq, sr in existing:
                     for dq in range(-hi, hi + 1):

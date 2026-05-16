@@ -1,5 +1,27 @@
 # Changelog
 
+## v4.2.1 - Wheel sync + worker bug fixes
+
+`v4.2.0` was tagged but the publish workflow was cancelled before any
+PyPI upload because `orca/engine.c` (the wheel-build source) was stale
+relative to the runtime-fallback `engine.c` at repo root. The wheels
+would have shipped without `board_encode_state_full` and a few other
+C entry points. `v4.2.1` is the first 4.2 release that actually
+publishes to PyPI.
+
+### Fixes
+- **`orca/engine.c` synced with root `engine.c`**. Wheel-build now
+  includes `board_encode_state_full`, `mcts_tree_new`, and the rest of
+  the May 14 engine additions.
+- **`_dr` undefined in `orca/data.py:950`**. Reference to a leftover
+  variable name after a refactor; replaced with `DISTANT_RANGE`. Self-
+  play workers no longer crash with `NameError` when distant-exploration
+  triggers.
+- **PR smoke CI** now also skips `tests/test_c_mcts.py` (stale tests
+  against an older C engine ABI; cleanup tracked separately).
+
+Everything from v4.2.0 below is included in v4.2.1.
+
 ## v4.2.0 - Training Workflow & Observability
 
 ### Training Workflow Polish
