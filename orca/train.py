@@ -830,6 +830,18 @@ class OrcaTrainer:
         # Rolling window of iteration durations for ETA estimation
         self._iter_times: collections.deque = collections.deque(maxlen=8)
 
+        # Per-run directory for workers.log, manifest, and run-scoped artifacts
+        run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self._run_id = run_id
+        self._run_dir = os.path.join("runs", run_id)
+        try:
+            os.makedirs(self._run_dir, exist_ok=True)
+        except Exception:
+            self._run_dir = "."  # fall back to cwd if runs/ is not writable
+        self._workers_log_path = os.path.join(self._run_dir, "workers.log")
+        self._worker_errors = 0
+        self._current_iter = 0  # updated each iteration for error logging
+
         # Feature toggles
         self.use_curriculum = use_curriculum
         self.use_auto_tuner = use_auto_tuner
@@ -943,6 +955,7 @@ class OrcaTrainer:
                 print(f"\n  Training stopped at iteration {iteration}")
                 break
             self.observer.on_iteration_start(iteration, self.num_iterations)
+            self._current_iter = iteration
 
             t0 = time.perf_counter()
 
@@ -1638,7 +1651,7 @@ class OrcaTrainer:
                 try:
                     samples, moves, result_val, ana_data = future.result()
                 except Exception as e:
-                    print(f"  |  GPU worker error: {e}")
+                    self._log_worker_error("gpu_selfplay", e, self._current_iter)
                     continue
 
                 with results_lock:
@@ -1740,9 +1753,7 @@ class OrcaTrainer:
                         batch_results = future.result()
                     except Exception as e:
                         worker_errors += 1
-                        print(f"  |  Worker error: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        self._log_worker_error("selfplay_v2", e, self._current_iter)
                         continue
 
                     for item in batch_results:
@@ -1791,9 +1802,7 @@ class OrcaTrainer:
                         batch_results = future.result()
                     except Exception as e:
                         worker_errors += 1
-                        print(f"  |  Worker error: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        self._log_worker_error("selfplay_v1", e, self._current_iter)
                         continue
 
                     for item in batch_results:
@@ -1837,6 +1846,31 @@ class OrcaTrainer:
             "wins": wins,
             "collected_samples": collected_samples,
         }
+
+    def _log_worker_error(self, where: str, exc: Exception,
+                          iteration: int) -> None:
+        """Log a worker future failure to runs/<id>/workers.log + stdout summary.
+
+        Previously these were either fully swallowed or only printed inline,
+        which made debugging silent worker crashes (OOM, CUDA assert,
+        deserialization) impossible after the fact.
+        """
+        self._worker_errors += 1
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            with open(self._workers_log_path, "a") as f:
+                f.write(
+                    f"\n--- iter {iteration} | {where} | "
+                    f"{datetime.now().isoformat(timespec='seconds')}\n"
+                )
+                f.write(f"{type(exc).__name__}: {exc}\n")
+                f.write(tb)
+        except Exception:
+            pass
+        print(f"  |  worker error #{self._worker_errors} "
+              f"({where}: {type(exc).__name__}) "
+              f"-> {self._workers_log_path}")
 
     def _save_checkpoint(self, iteration: int, optimizer, scheduler,
                          replay_buffer: ReplayBuffer, auto_tuner: AutoTuner):
