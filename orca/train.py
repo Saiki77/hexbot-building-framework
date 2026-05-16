@@ -799,6 +799,9 @@ class OrcaTrainer:
         use_auto_tuner: bool = True,
         auto_tuner_dry_run: bool = False,
         tensorboard: bool = False,
+        wandb: bool = False,
+        wandb_project: str = "hexbot",
+        wandb_run_name: Optional[str] = None,
         use_adaptive_lr: bool = True,
         use_augmentation: bool = True,
         use_mixed_precision: bool = True,
@@ -887,6 +890,10 @@ class OrcaTrainer:
         self.auto_tuner_dry_run = auto_tuner_dry_run
         self.tensorboard_enabled = tensorboard
         self._tb_writer = None
+        self.wandb_enabled = wandb
+        self.wandb_project = wandb_project
+        self.wandb_run_name = wandb_run_name
+        self._wandb_run = None
         self.use_adaptive_lr = use_adaptive_lr
         self.use_augmentation = use_augmentation
         self.use_mixed_precision = use_mixed_precision and self.device.type == 'cuda'
@@ -1991,23 +1998,46 @@ class OrcaTrainer:
                 print(f"  TensorBoard: tensorboard --logdir {self._run_dir}")
             except ImportError:
                 print("  TensorBoard requested but `tensorboard` not installed "
-                      "(`pip install tensorboard`)")
+                      "(`pip install 'hexbot[tensorboard]'`)")
                 self._tb_writer = None
 
-    def _tb_log(self, iteration: int, **metrics) -> None:
-        """Best-effort TensorBoard scalar logging. Silent if writer is None."""
-        if self._tb_writer is None:
-            return
-        for tag, value in metrics.items():
-            if value is None:
-                continue
+        if self.wandb_enabled:
             try:
-                self._tb_writer.add_scalar(tag, float(value), iteration)
+                import wandb as _wandb
+                self._wandb_run = _wandb.init(
+                    project=self.wandb_project,
+                    name=self.wandb_run_name or self._run_id,
+                    config=manifest.get("config", {}),
+                    dir=self._run_dir,
+                    reinit=True,
+                )
+                print(f"  W&B: project={self.wandb_project} "
+                      f"run={self._wandb_run.name}")
+            except ImportError:
+                print("  W&B requested but `wandb` not installed "
+                      "(`pip install 'hexbot[wandb]'`)")
+                self._wandb_run = None
+            except Exception as e:
+                print(f"  W&B init failed: {e}")
+                self._wandb_run = None
+
+    def _tb_log(self, iteration: int, **metrics) -> None:
+        """Best-effort metric logging to TensorBoard and W&B. Silent on error."""
+        clean = {k: float(v) for k, v in metrics.items() if v is not None}
+        if self._tb_writer is not None:
+            for tag, value in clean.items():
+                try:
+                    self._tb_writer.add_scalar(tag, value, iteration)
+                except Exception:
+                    pass
+        if self._wandb_run is not None:
+            try:
+                self._wandb_run.log(clean, step=iteration)
             except Exception:
                 pass
 
     def _close_observability(self) -> None:
-        """Flush and close the TensorBoard writer if open."""
+        """Flush and close the TensorBoard / W&B writers if open."""
         if self._tb_writer is not None:
             try:
                 self._tb_writer.flush()
@@ -2015,6 +2045,12 @@ class OrcaTrainer:
             except Exception:
                 pass
             self._tb_writer = None
+        if self._wandb_run is not None:
+            try:
+                self._wandb_run.finish()
+            except Exception:
+                pass
+            self._wandb_run = None
 
     def _log_worker_error(self, where: str, exc: Exception,
                           iteration: int) -> None:
@@ -2182,6 +2218,13 @@ All parameters default to values in orca/config.py. CLI args override config.
     g.add_argument("--tensorboard", action="store_true",
                    help="Write TensorBoard scalars to runs/<id>/ for "
                         "run-to-run comparison (requires `pip install tensorboard`)")
+    g.add_argument("--wandb", action="store_true",
+                   help="Log to Weights & Biases "
+                        "(requires `pip install 'hexbot[wandb]'`)")
+    g.add_argument("--wandb-project", type=str, default="hexbot",
+                   help="W&B project name (default: hexbot)")
+    g.add_argument("--wandb-run-name", type=str, default=None,
+                   help="W&B run name (default: run timestamp)")
     g.add_argument("--no-adaptive-lr", action="store_true",
                    help="Disable cosine annealing LR (use fixed LR)")
     g.add_argument("--no-augmentation", action="store_true",
@@ -2240,6 +2283,9 @@ All parameters default to values in orca/config.py. CLI args override config.
         use_auto_tuner=not args.no_auto_tuner,
         auto_tuner_dry_run=args.auto_tuner_dry_run,
         tensorboard=args.tensorboard,
+        wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
         use_adaptive_lr=not args.no_adaptive_lr,
         use_augmentation=not args.no_augmentation,
         plateau_threshold=args.plateau_threshold,

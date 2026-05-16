@@ -37,6 +37,15 @@ dashboard = [
 distributed = [
     "ray>=2.0",
 ]
+tensorboard = [
+    "tensorboard",
+]
+wandb = [
+    "wandb",
+]
+sweep = [
+    "optuna>=3.0",
+]
 all = [
     "flask>=2.0",
     "flask-socketio>=5.0",
@@ -45,6 +54,9 @@ all = [
     "requests",
     "onnxruntime",
     "onnxscript",
+    "tensorboard",
+    "wandb",
+    "optuna>=3.0",
 ]
 
 [project.urls]
