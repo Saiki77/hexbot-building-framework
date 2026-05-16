@@ -83,6 +83,28 @@ python train_dashboard.py
 python -m orca.train --config hex-gnn --iterations 50
 ```
 
+## Model Zoo
+
+Share bots with the community. Download by name, upload your trained checkpoints. Built-in metadata (architecture, ELO, author, description) keeps everything interoperable.
+
+```python
+from orca.zoo import Zoo
+
+# See what others have shared
+Zoo.list()
+
+# Try someone else's bot
+bot = Zoo.download('orca-v3')
+
+# Share yours
+Zoo.package('hex_checkpoint_500.pt',
+            name='my-bot-v1', author='You', elo=1450,
+            description='Trained 500 iterations with hex-masked')
+Zoo.upload('my-bot-v1.pt', name='my-bot-v1')
+```
+
+Trained something interesting? Publish it and the next person can pull it with one line. See the [Evaluation and Sharing](https://github.com/Saiki77/hexbot-building-framework/wiki/Evaluation-and-Sharing) wiki page for the full lifecycle (Arena, Leaderboard, Zoo).
+
 ## Features
 
 | Feature | Description |
