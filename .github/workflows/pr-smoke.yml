@@ -37,8 +37,10 @@ jobs:
       - name: Install package in editable mode
         run: |
           python -m pip install --upgrade pip
+          # The training smoke step needs ONNX support (bot.export_onnx is
+          # called every iteration to publish weights to workers).
           pip install -e .
-          pip install pytest
+          pip install pytest onnxscript onnxruntime
 
       - name: Run unit tests
         run: pytest tests/ -q --maxfail=3
