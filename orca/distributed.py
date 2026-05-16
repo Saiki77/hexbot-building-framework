@@ -1,28 +1,33 @@
 """
 Distributed training for Orca.
 
-Scales self-play across multiple processes/machines using either
-multiprocessing (single machine) or Ray (multi-machine).
+Current status:
 
-Usage:
-    # Single machine, multiple workers
-    python -m orca.train --workers 8
+- `SelfPlayPool`: fully implemented. Wraps ProcessPoolExecutor with
+  game-aware batching for parallel self-play game generation on a
+  single machine.
 
-    # Multi-GPU (requires NCCL)
-    from orca.distributed import DistributedTrainer
-    trainer = DistributedTrainer(num_gpus=4)
-    trainer.run()
+- `MultiGPUTrainer`: **STUB**. Accepts a `num_gpus` argument and
+  currently falls back to single-GPU `OrcaTrainer`. Real PyTorch
+  DistributedDataParallel integration is not yet implemented. See
+  TODO comments in the class body.
 
-    # Ray cluster
-    from orca.distributed import RayTrainer
-    trainer = RayTrainer(num_workers=16)
-    trainer.run()
+- `RayTrainer`: **STUB**. Initializes Ray (if installed) but does not
+  spawn remote actors. Currently equivalent to running `OrcaTrainer`
+  with more local workers. Multi-machine scaling is not yet
+  implemented. See TODO comments in the class body.
+
+For single-machine parallel self-play, use `SelfPlayPool` directly or
+`python -m orca.train --workers N`. The stub classes are kept for API
+compatibility and to mark the intended extension points; they emit a
+runtime warning on construction so users are not surprised.
 """
 
 import multiprocessing
 import os
 import sys
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
@@ -84,16 +89,14 @@ class SelfPlayPool:
 
 
 class MultiGPUTrainer:
-    """Train with data parallelism across multiple GPUs.
+    """STUB: Multi-GPU training is not yet implemented.
 
-    Uses PyTorch DistributedDataParallel for synchronized gradient updates.
-    Self-play runs on CPU workers, training on multiple GPUs.
+    Current behaviour: falls back to single-GPU `OrcaTrainer` regardless
+    of `num_gpus`. The DistributedDataParallel integration is left as a
+    deliberate stub; see TODO inside `run()`.
 
-    Requires CUDA and NCCL backend.
-
-    Usage:
-        trainer = MultiGPUTrainer(num_gpus=4)
-        trainer.run(iterations=100)
+    Use `OrcaTrainer` directly until this is finished. The class exists
+    to mark the intended extension point and keep imports stable.
     """
 
     def __init__(self, num_gpus: int = None, **trainer_kwargs):
@@ -105,32 +108,23 @@ class MultiGPUTrainer:
 
         if not torch.cuda.is_available():
             raise RuntimeError("MultiGPUTrainer requires CUDA")
-        if num_gpus < 2:
-            print(f"Warning: only {num_gpus} GPU(s) detected, "
-                  f"use OrcaTrainer for single-GPU training")
+
+        warnings.warn(
+            "MultiGPUTrainer is a stub: real DDP is not implemented. "
+            "It will fall back to single-GPU OrcaTrainer. Use OrcaTrainer "
+            "directly for clarity, or wait for DDP to land.",
+            UserWarning, stacklevel=2,
+        )
 
     def run(self, iterations: int = 100):
-        """Run distributed training.
+        """STUB: run on a single GPU until DDP is implemented.
 
-        For single-GPU, falls back to standard OrcaTrainer.
-        For multi-GPU, wraps the network in DistributedDataParallel.
+        TODO: implement true multi-GPU via torch.nn.parallel.DistributedDataParallel.
+        Launch pattern would be:
+            torchrun --nproc_per_node=N -m orca.train
+
+        For now this just delegates to OrcaTrainer on cuda:0.
         """
-        import torch
-        import torch.distributed as dist
-
-        if self.num_gpus <= 1:
-            from orca.train import OrcaTrainer
-            trainer = OrcaTrainer(iterations=iterations, **self.trainer_kwargs)
-            trainer.run()
-            return
-
-        # Multi-GPU setup
-        print(f"Distributed training on {self.num_gpus} GPUs")
-        print("Note: multi-GPU requires launching with torchrun:")
-        print(f"  torchrun --nproc_per_node={self.num_gpus} -m orca.train")
-        print()
-
-        # For now, fall back to single-GPU with a note
         from orca.train import OrcaTrainer
         trainer = OrcaTrainer(
             iterations=iterations,
@@ -141,40 +135,44 @@ class MultiGPUTrainer:
 
 
 class RayTrainer:
-    """Distributed training using Ray for multi-machine scaling.
+    """STUB: Multi-machine Ray-based training is not yet implemented.
 
-    Self-play workers run as Ray remote actors, training stays on the
-    driver machine's GPU. Scales to hundreds of CPU workers.
+    Current behaviour: if Ray is installed, initializes a Ray runtime
+    for visibility, then runs `OrcaTrainer` locally with `num_workers`
+    process workers. There are no Ray remote actors and no cross-machine
+    coordination yet.
 
-    Requires: pip install ray
-
-    Usage:
-        trainer = RayTrainer(num_workers=16)
-        trainer.run(iterations=100)
+    The class exists to mark the intended extension point. Use
+    `OrcaTrainer --workers N` or `SelfPlayPool` directly until this is
+    finished.
     """
 
     def __init__(self, num_workers: int = 8, **trainer_kwargs):
         self.num_workers = num_workers
         self.trainer_kwargs = trainer_kwargs
+        warnings.warn(
+            "RayTrainer is a stub: remote actors are not implemented. "
+            "It will run locally with multiprocessing workers. Use "
+            "OrcaTrainer --workers N for clarity.",
+            UserWarning, stacklevel=2,
+        )
 
     def run(self, iterations: int = 100):
-        """Run Ray-distributed training."""
+        """STUB: run locally with multiprocessing until Ray actors are implemented.
+
+        TODO: convert self-play workers into ray.remote actors so the
+        pool can span machines. Driver keeps the trainer + GPU; actors
+        run inference + game logic with periodic network state pulls.
+        """
         try:
             import ray
+            if not ray.is_initialized():
+                ray.init()
+            print(f"Ray cluster: {ray.cluster_resources()}")
         except ImportError:
-            print("Ray not installed. Install with: pip install ray")
-            print("Falling back to local multiprocessing.")
-            from orca.train import OrcaTrainer
-            OrcaTrainer(iterations=iterations, **self.trainer_kwargs).run()
-            return
+            print("Ray not installed. Install with: pip install ray "
+                  "(falling back to local multiprocessing).")
 
-        if not ray.is_initialized():
-            ray.init()
-
-        print(f"Ray cluster: {ray.cluster_resources()}")
-        print(f"Workers: {self.num_workers}")
-
-        # For now, use local OrcaTrainer with more workers
         from orca.train import OrcaTrainer
         OrcaTrainer(
             iterations=iterations,
