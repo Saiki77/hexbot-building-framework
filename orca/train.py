@@ -207,23 +207,42 @@ _curriculum_last_elo: Optional[float] = None
 _curriculum_stall_iters: int = 0
 
 
-def get_curriculum_sims(iteration: int, configured_sims: int = 0) -> int:
-    """Return configured sims directly (no curriculum scaling)."""
+def get_curriculum_sims(iteration: int, configured_sims: int = 0,
+                        plateau_iters: int = 0,
+                        plateau_boost: int = 0) -> int:
+    """Return configured sims, optionally boosted when ELO has plateaued.
+
+    A plateau is considered active when the last `plateau_iters` ELO
+    deltas all fell below the configured plateau threshold (see
+    `update_curriculum_plateau`). When active and `plateau_boost > 0`,
+    we add the boost up to a hard cap of 400 sims.
+    """
     if configured_sims <= 0:
         from orca.config import NUM_SIMULATIONS
         configured_sims = NUM_SIMULATIONS
+    if plateau_iters > 0 and plateau_boost > 0:
+        if _curriculum_stall_iters >= plateau_iters:
+            configured_sims = min(400, configured_sims + plateau_boost)
     return configured_sims
 
 
-def update_curriculum_plateau(current_elo: float) -> None:
-    """Track ELO plateaus to trigger curriculum boosts."""
+def update_curriculum_plateau(current_elo: float,
+                              threshold: float = 15.0) -> int:
+    """Track ELO plateaus to trigger curriculum boosts.
+
+    Returns the running count of consecutive iterations where the ELO
+    has moved less than `threshold` from the previous iteration. The
+    next call to `get_curriculum_sims` reads that count to decide
+    whether to apply a sim boost.
+    """
     global _curriculum_last_elo, _curriculum_stall_iters
     if _curriculum_last_elo is not None:
-        if abs(current_elo - _curriculum_last_elo) < 15:
+        if abs(current_elo - _curriculum_last_elo) < threshold:
             _curriculum_stall_iters += 1
         else:
             _curriculum_stall_iters = 0
     _curriculum_last_elo = current_elo
+    return _curriculum_stall_iters
 
 
 def get_curriculum_games(iteration: int, base: int) -> int:
@@ -985,8 +1004,14 @@ class OrcaTrainer:
             t0 = time.perf_counter()
 
             # Curriculum
-            current_sims = max(auto_tuner.params["sims"],
-                               get_curriculum_sims(iteration, self.mcts_sims))
+            current_sims = max(
+                auto_tuner.params["sims"],
+                get_curriculum_sims(
+                    iteration, self.mcts_sims,
+                    plateau_iters=self.plateau_iters,
+                    plateau_boost=self.plateau_sim_boost,
+                ),
+            )
             current_games = get_curriculum_games(iteration, self.games_per_iter)
             current_lr = optimizer.param_groups[0]["lr"]
 
@@ -1176,7 +1201,8 @@ class OrcaTrainer:
                     self.metrics["current_elo"] = new_elo
                     self.metrics["elo_history"].append(
                         {"iteration": iteration + 1, "elo": round(new_elo, 1)})
-                    update_curriculum_plateau(new_elo)
+                    update_curriculum_plateau(
+                        new_elo, threshold=self.plateau_threshold)
                     elo_str = f" | ELO {new_elo:.0f} ({sign}{delta:.0f})"
                     print(f"  |  ELO: {new_elo:.0f} ({sign}{delta:.0f}) "
                           f"in {time.perf_counter() - t_elo:.1f}s")
