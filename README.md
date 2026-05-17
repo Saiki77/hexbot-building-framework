@@ -7,7 +7,7 @@ Home of the **Orca** bot.
 [![PyPI](https://img.shields.io/pypi/v/hexbot)](https://pypi.org/project/hexbot/)
 [![Wiki](https://img.shields.io/badge/docs-wiki-blue?logo=github)](https://github.com/Saiki77/hexbot-building-framework/wiki)
 
-> Full guides, learning path, and feature reference live on the **[Wiki](https://github.com/Saiki77/hexbot-building-framework/wiki)**. Start with [Quickstart](https://github.com/Saiki77/hexbot-building-framework/wiki/Quickstart) or [Concepts](https://github.com/Saiki77/hexbot-building-framework/wiki/Concepts). Try it now in **[Colab](https://colab.research.google.com/github/Saiki77/hexbot-building-framework/blob/main/notebooks/colab_quickstart.ipynb)** (free T4 GPU, ~5 minutes).
+> Full guides, learning path, and feature reference live on the **[Wiki](https://github.com/Saiki77/hexbot-building-framework/wiki)**. Start with [Quickstart](https://github.com/Saiki77/hexbot-building-framework/wiki/Quickstart) or [Concepts](https://github.com/Saiki77/hexbot-building-framework/wiki/Concepts). Try it now in Colab: **[Guided tour](https://colab.research.google.com/github/Saiki77/hexbot-building-framework/blob/main/notebooks/guided_tour.ipynb)** (~30 min, builds up from game basics to training) or **[Advanced internals](https://colab.research.google.com/github/Saiki77/hexbot-building-framework/blob/main/notebooks/advanced_internals.ipynb)** (MCTS math, training loss, optimisations).
 
 > **Built a great bot with this?** Open an issue or get in touch, and I'll feature it here.
 
