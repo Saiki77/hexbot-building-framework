@@ -1016,16 +1016,13 @@ def _play_bot_move(session):
 
     if opponent == 'sealbot':
         try:
-            from opponents.ramora.adapter import create_ramora_bot
-            # MUST use SealBot's own game.py — the C++ does py::import("game")
-            # and checks Player.A identity. Different module = different objects = broken.
-            import importlib, sys as _sys
-            _sealbot_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                        'opponents', 'sealbot')
-            if _sealbot_dir not in _sys.path:
-                _sys.path.insert(0, _sealbot_dir)
-            _seal_game = importlib.import_module('game')
-            SealHexGame = _seal_game.HexGame
+            # Adapter does the sealbot-or-ramora game.py discovery and raises
+            # SealBotUnavailable if neither path is available.
+            from opponents.ramora.adapter import (
+                create_ramora_bot, HexGame as SealHexGame, SealBotUnavailable,
+            )
+            if SealHexGame is None:
+                raise SealBotUnavailable("no game.py found")
             # Cache sealbot + game in session
             if '_sealbot' not in session:
                 session['_sealbot'] = create_ramora_bot(time_limit=2.0)
